@@ -109,6 +109,35 @@ SpawnCount=4
 **Open-topped for buildings** is just `Kind=Cargo` + `Open=yes` on a BuildingType — the feature
 "open-topped bunkers" is the Cargo bay unhardcoded from vehicles-only.
 
+### 2.1a Building fire mode — garrison vs open-topped (both supported, toggleable)
+
+The engine has **three separate in-building firing systems** (garrison/UC,
+Battle/Tank-Bunker, open-topped) — see the Encyclopedia page
+`Ext-Building-Occupancy.md`. RA2-style **garrison** and **open-topped** are *both*
+desirable and *similar but not identical*, so a Cargo bay on a BuildingType picks
+one via a fire-mode policy (shared "occupy" entry gesture, different firing path):
+
+```ini
+[GATECH]                 ; a BuildingType with an infantry hold
+Bays=BUNKERHOLD
+[BUNKERHOLD]
+Kind=Cargo
+FireMode=OpenTopped      ; None (vanilla) | Garrison | OpenTopped
+Open=yes                 ; (OpenTopped mode) each occupant fires its own weapon/ROF/range
+```
+
+- **`Garrison`** — the *improved* RA2-style garrison: keep the shared occupy-weapon
+  semantics but fix its defects (Internal Error on mismatched occupant ROF/range;
+  mind-control breaking the arbitration). Layers on Antares "Trenches", not a fork.
+- **`OpenTopped`** — each occupant is submitted to the open-topped system
+  (`EnteredOpenTopped` → logic layer) and fires its **own** weapon independently,
+  sidestepping the shared-weapon defects entirely. (This is what Phobos PR#1879
+  does; PayloadExt implements it standalone since #1879 is unmerged.)
+- **`None`** — vanilla garrison, untouched. Default, so existing buildings are safe.
+
+Deferred/related: InfantryType open-topped (transport-infantry that themselves hold
+open-topped passengers) rides the same Cargo-bay mechanism, lower priority.
+
 ### 2.2 Veterancy → OpenTopped index (the clarified feature)
 
 The **OpenTopped index** selects a *fire-out behavior profile*; Veteran/Elite pick a different

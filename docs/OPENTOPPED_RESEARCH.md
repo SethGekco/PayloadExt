@@ -12,6 +12,51 @@ Goal (Rex): make `OpenTopped` usable on **BuildingTypes** (priority) and
 Rex wants garrisoned-style occupancy but with each occupant firing as *itself*
 (its own weapon, ROF, range, target) — i.e. genuine open-topped behavior.
 
+## UPDATE (2026-07-31): both systems are in scope, as a per-building toggle
+
+Rex's direction: **don't pick garrison *or* open-topped — offer both**, toggleable
+per building. They are "similar but not identical" and each has its uses:
+- **Improved garrison** (RA2-style): keep the shared occupy-weapon feel but fix
+  its defects (ROF/range Internal Error, mind-control break).
+- **Open-topped building**: each occupant fires its own weapon (Route A below).
+
+This fits the PayloadExt **Bay** primitive cleanly: a building's infantry hold is
+a `Bay(Cargo)` with a `FireMode = Garrison | OpenTopped` policy. Same entry
+gesture (garrison "occupy"), different firing path.
+
+> ⚠ Open for Rex: what specifically makes the intended garrison mode "**RA2**-style"
+> vs the current YR one? The engine has *three* separate in-building systems
+> (Garrison/UC, Battle-/Tank-Bunker, Open-Topped — see Encyclopedia page below);
+> need Rex to name the exact behavioural target for "improved RA2 garrison."
+
+### Prior art found (Encyclopedia registry) — this reshapes build-vs-reuse
+
+- **Phobos PR #1879** — *"Implement open-topped building support and fix building
+  self-attack issue"* (@Metadorius), **open/unmerged**. Hooks infantry/unit
+  `PerCellProcess` at building-enter (`0x51A320` / `0x73A2F4`,
+  `SubmitToOpenToppedOnBuildingEnter`) + disable-on-unload/debris
+  (`0x44DBA9` / `0x442D97`). This is exactly Route A. **PayloadExt cannot depend
+  on an unmerged PR**, so implement our own Route A using these addresses, and
+  stay compatible if #1879 later merges (don't double-hook the enter point).
+- **Antares "Trenches"** (`Ext/Building/Hooks.Trenches.cpp`) — the garrison
+  extension surface: `GarrisonBuilding_OccupierEntered` (`0x52297F`),
+  `CanBeOccupied_SpecificOccupiers/Assaulters`, `UnloadOccupants`,
+  `KillOccupiers`. The **improved-garrison** mode should layer on / coexist with
+  Trenches, not fork it.
+
+### Confirmed Route-A mechanism (release Phobos source)
+
+`Phobos/src/Ext/Techno/Body.Update.cpp` (~1234): `EnteredOpenTopped(passenger)`
+**adds the passenger to the logic layer** (`LogicClass::Instance`) and sets
+`passenger->Transporter`, so it receives update ticks and fires; `ExitedOpenTopped`
+reverses it. This runs only for units in `Passengers`. Buildings keep infantry in
+`Occupants`, so it never runs — the comment there literally says *"OpenTopped does
+not work properly with buildings to begin with."* So Route A = at building-enter,
+put the occupier into the passenger/logic-layer path + `EnteredOpenTopped`.
+
+Full hook surface + verification status: **Encyclopedia
+`encyclopedia/Ext-Building-Occupancy.md`** (added this session).
+
 ---
 
 ## Key finding: garrison and open-topped are TWO SEPARATE engine systems
@@ -95,32 +140,43 @@ weapon with its own reload timer, instead of the shared occupy-weapon.
 - **Con:** reimplements per-occupant target acquisition + reload + mind-control
   handling by hand — more new code, more sync surface, easy to drift from vanilla.
 
-**Recommendation: Route A.** It is closer to "enable OpenTopped for buildings"
-literally, and reuses the battle-tested open-topped firing/targeting/damage
-machinery rather than re-deriving it. Fall back to B only if the building update
-cannot be made to drive the open-topped passenger loop.
+**Decision (2026-07-31): ship BOTH as a per-building `FireMode` toggle.** Route A
+is the **OpenTopped** mode (validated by PR#1879 + the release-Phobos mechanism
+above). Route B's per-occupant work becomes the **improved Garrison** mode — but
+scoped to *fixing* the shared-weapon path (ROF/range Internal Error, mind-control)
+while keeping garrison semantics, layered on Antares Trenches. A building selects
+one mode; the entry gesture (garrison "occupy") is shared.
 
 ---
 
 ## Open questions for Rex before feature code
-1. **Route A vs B** — confirm A (make occupants open-topped passengers) is the
-   intended direction.
-2. **Opt-in tag** — reuse bare `OpenTopped=yes` on the building, or a distinct
-   `PayloadExt` key (e.g. `OpenTopped.Building=yes`) so existing garrison
-   buildings are untouched? (Lean: distinct key → zero risk to vanilla garrison.)
-3. **Entry** — keep the garrison "occupy" command as the entry gesture, or a
-   transport-style load? (Lean: keep garrison entry; only firing changes.)
-4. **Capacity source** — `MaxNumberOccupants` (garrison) vs `Passengers`/
-   `SizeLimit` (transport) for the cap.
+1. ~~Route A vs B~~ — **resolved**: ship both as a `FireMode` toggle (see Decision).
+2. **"RA2-style" garrison** — what specifically should the improved-garrison mode
+   do differently from the current YR garrison? (Engine has 3 separate systems:
+   Garrison/UC, Battle-/Tank-Bunker, Open-Topped — need the exact target.)
+3. **Opt-in / mode tag** — one tri-state key on the building selecting the hold's
+   fire mode, e.g. `Payload.BuildingFireMode=none|garrison|opentopped` (default
+   `none` = vanilla, so existing garrison buildings are untouched). Confirm the
+   spelling. (Lean: distinct PayloadExt key, never overload bare `OpenTopped=`.)
+4. **Entry** — keep the garrison "occupy" command as the shared entry gesture for
+   both modes. (Lean: yes; only the firing path differs.)
+5. **Capacity source** — `MaxNumberOccupants` (garrison) vs `Passengers`/
+   `SizeLimit` (transport) for the cap in open-topped mode.
 
-## Next actions (once route confirmed)
-- ⚠ Ghidra: dive `BuildingClass::AI` / occupant update to find where (and
-  whether) an open-topped passenger firing loop would run for a building; record
-  the address in this file + the Hook Encyclopedia (`Ext-Payload.md`).
-- ⚠ Ghidra: dive the occupant-add site to place the passenger-register +
-  `EnteredOpenTopped` call.
+## Next actions (route resolved; awaiting Q2/Q3 spellings)
+- ⚠ Ghidra/PR#1879: confirm the building-enter submit point (`0x51A320` infantry
+  / `0x73A2F4` unit) and how PR#1879 registers the occupier as an open-topped
+  passenger; do NOT double-hook if #1879 is present. Record in
+  Encyclopedia `Ext-Building-Occupancy.md`.
+- ⚠ Ghidra: confirm where the open-topped passenger fire/target loop is driven so
+  a building occupier put on that path actually fires (logic-layer membership via
+  `EnteredOpenTopped` appears to be the key — verify).
+- Improved-garrison mode: locate the ROF/range Internal-Error site + the
+  mind-control interaction on the shared occupy-weapon path; layer on Antares
+  Trenches (`0x52297F` `OccupierEntered`, etc.), don't fork.
 - Stand up `Ext/BuildingType` + `Ext/Building` containers (mirror the
-  TechnoAttachmentExt Container<T> pattern) and the opt-in tag parse.
+  TechnoAttachmentExt Container<T> pattern) + the `FireMode` tag parse.
 
-All addresses above are from Phobos source (release channel) and are ⚠ until
-re-verified against `/home/rex/gamemd.exe` in Ghidra.
+All addresses above are from Phobos/Antares source (release + PR#1879 channel) and
+are ⚠ until re-verified against `/home/rex/gamemd.exe` in Ghidra. Full hook
+surface: Encyclopedia `encyclopedia/Ext-Building-Occupancy.md`.
