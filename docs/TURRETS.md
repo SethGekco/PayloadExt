@@ -120,11 +120,25 @@ Consequences:
 - Antares separately owns `UnitClass_DrawVXL_Turrets` (`0x73BD15`) and
   `DrawVXL_Barrels1/2/3` for the multi-turret art.
 
-**Recommendation:** treat proper per-section depth sorting as its own phase, and
-first decide whether to (a) contribute it to Phobos's existing rewrite, or
-(b) ship our own rewrite that supersedes Phobos when both are loaded. This needs
-Rex's call before any code — it is the one item here that cannot be done as a
-small additive hook.
+**DECIDED (Rex, 2026-08-20): supersede.** PayloadExt ships its **own** rewrite of
+the voxel turret/barrel draw block and wins over Phobos when both are loaded.
+Rationale: stay independent — Phobos has a strict rule against AI-generated
+contributions, so upstreaming is not an option, and depending on their rewrite
+would couple us to code we cannot change.
+
+Implementation shape for that phase (not yet built):
+- Hook `0x73BA12` like Phobos does and return `SkipGameCode = 0x73BEA4`, so the
+  vanilla block is skipped exactly once regardless of who else is present.
+- **Load order matters.** Both DLLs hook the same address; whoever Syringe calls
+  first and returns non-zero wins. We must verify empirically which order the
+  game loads them in, and document it — this is the one fragile part.
+- Draw body / turret / barrel with proper depth ordering derived from the HVA
+  section transforms, instead of the unconditional body→turret→barrel sequence
+  both vanilla and Phobos use. That ordering *is* the feature.
+- Keep reading `CurrentTurretNumber` from the stack slot Phobos uses
+  (`STACK_OFFSET(0x1C4, -0x1A8)`) so the §2 selectors keep working.
+- Must also account for Antares' `UnitClass_DrawVXL_Turrets` (`0x73BD15`) and
+  `_Barrels1/2/3`, which live *inside* the block we would be skipping.
 
 ---
 

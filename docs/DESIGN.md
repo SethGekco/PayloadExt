@@ -126,9 +126,12 @@ FireMode=OpenTopped      ; None (vanilla) | Garrison | OpenTopped
 Open=yes                 ; (OpenTopped mode) each occupant fires its own weapon/ROF/range
 ```
 
-- **`Garrison`** — the *improved* RA2-style garrison: keep the shared occupy-weapon
-  semantics but fix its defects (Internal Error on mismatched occupant ROF/range;
-  mind-control breaking the arbitration). Layers on Antares "Trenches", not a fork.
+- **`Garrison`** — the RA2-style **crewed building weapon**: the *building* owns
+  the weapon, it only fires while infantry are inside, and it fires faster the
+  more occupants there are. This sidesteps the YR garrison's defects (Internal
+  Error on mismatched occupant ROF/range, mind-control breaking the shared-weapon
+  arbitration) because there is only ever **one** weapon — the building's.
+  Implemented via the `Crew.*` tags; see docs/GARRISON.md.
 - **`OpenTopped`** — each occupant is submitted to the open-topped system
   (`EnteredOpenTopped` → logic layer) and fires its **own** weapon independently,
   sidestepping the shared-weapon defects entirely. (This is what Phobos PR#1879

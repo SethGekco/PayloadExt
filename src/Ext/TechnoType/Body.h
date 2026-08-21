@@ -45,10 +45,33 @@ public:
 				|| !this->Turret_RangeBands.empty();
 		}
 
+		// --- Crewed weapon (RA2-style garrison) — see docs/GARRISON.md -------
+		// The building fires its OWN weapon, but only while infantry are inside,
+		// and faster the more of them there are.
+
+		// Requires at least Crew_MinOccupants inside to fire at all.
+		Valueable<bool> Crew_Required;
+		Valueable<int> Crew_MinOccupants;
+		// Divide the rearm delay by the occupant count (the RA2 feel). This
+		// mirrors what vanilla does at 0x6FD17B for true occupy-path buildings,
+		// but works for a building firing its own weapon.
+		Valueable<bool> Crew_ROFPerOccupant;
+		// Caps the divisor so a full building isn't absurdly fast. 0 = uncapped.
+		Valueable<int> Crew_ROFMaxOccupants;
+
+		bool HasCrewLogic() const
+		{
+			return this->Crew_Required.Get() || this->Crew_ROFPerOccupant.Get();
+		}
+
 		ExtData(TechnoTypeClass* OwnerObject) : Extension<TechnoTypeClass>(OwnerObject)
 			, Turret_FollowWeapon { false }
 			, Turret_RangeBands {}
 			, Turret_RangeIndices {}
+			, Crew_Required { false }
+			, Crew_MinOccupants { 1 }
+			, Crew_ROFPerOccupant { false }
+			, Crew_ROFMaxOccupants { 0 }
 		{ }
 
 		virtual ~ExtData() = default;

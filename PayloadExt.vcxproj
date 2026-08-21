@@ -31,6 +31,8 @@
     <!-- Turret index selectors -->
     <ClCompile Include="src\Ext\TechnoType\Body.cpp" />
     <ClCompile Include="src\Hooks.Turrets.cpp" />
+    <!-- RA2-style garrison: building weapon crewed by occupants -->
+    <ClCompile Include="src\Hooks.CrewedWeapon.cpp" />
   </ItemGroup>
 
   <!-- Header files -->

@@ -75,13 +75,16 @@ Transparent.Level=60
 
 `Image.Enemy.Index=EnemyImage` from Rex's list becomes
 `Image.Profile.Enemy=EnemyImage` — same capability, and it reads consistently
-with every other domain instead of overloading the word "Index" for two different
-things (a *number* for turrets, a *section name* for images).
+with every other domain (see the naming convention below).
 
-### Naming decision to make (open)
-`Index` currently means both "an integer slot" (turret/open-topped) and "a named
-section" (`Image.Enemy.Index=`). Recommend reserving **`Index`** for integers and
-**`Profile`** for named sections. Rex to confirm.
+### Naming convention (DECIDED — Rex, 2026-08-20)
+**`Index` = an integer slot. `Profile` = a named section.** Never overload one for
+the other. So:
+
+- `Turret.RangeIndices=0,1,2`, `Open.Index.Elite=2` → integers, keep `Index`.
+- Rex's original `Image.Enemy.Index=EnemyImage` → **`Image.Profile.Enemy=EnemyImage`**.
+
+This is now binding for every domain in this document.
 
 ## 4. The hard constraint: cosmetic vs logical (sync safety)
 

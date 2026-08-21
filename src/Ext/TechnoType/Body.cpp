@@ -82,6 +82,11 @@ void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 	this->Turret_FollowWeapon.Read(exINI, pSection, "Turret.FollowWeapon");
 	this->Turret_RangeBands.Read(exINI, pSection, "Turret.RangeBands");
 	this->Turret_RangeIndices.Read(exINI, pSection, "Turret.RangeIndices");
+
+	this->Crew_Required.Read(exINI, pSection, "Crew.Required");
+	this->Crew_MinOccupants.Read(exINI, pSection, "Crew.MinOccupants");
+	this->Crew_ROFPerOccupant.Read(exINI, pSection, "Crew.ROFPerOccupant");
+	this->Crew_ROFMaxOccupants.Read(exINI, pSection, "Crew.ROFMaxOccupants");
 }
 
 template <typename T>
@@ -91,6 +96,10 @@ void TechnoTypeExt::ExtData::Serialize(T& Stm)
 		.Process(this->Turret_FollowWeapon)
 		.Process(this->Turret_RangeBands)
 		.Process(this->Turret_RangeIndices)
+		.Process(this->Crew_Required)
+		.Process(this->Crew_MinOccupants)
+		.Process(this->Crew_ROFPerOccupant)
+		.Process(this->Crew_ROFMaxOccupants)
 		;
 }
 
