@@ -56,6 +56,37 @@ divisor for that case.
 
 ---
 
+### 1a. Which INI tags a crewed building actually needs (verified by disassembly)
+
+`BuildingClass::CanBeOccupiedBy` (`0x457CE0`) is the entry gate. Verified field
+offsets on `BuildingTypeClass`: **`+0x157B` = `CanBeOccupied`**,
+**`+0x157C` = `CanOccupyFire`**, **`+0x1580` = `MaxNumberOccupants`**.
+
+```asm
+457CF9  mov  cl, [Type+0x157B]     ; CanBeOccupied
+457CFF  test cl, cl
+457D01  je   fail                  ; -> REQUIRED
+...
+457D79  call [vtable+0x408]        ; eax = live GetOccupantCount()
+457D85  cmp  eax, [Type+0x1580]    ; vs MaxNumberOccupants
+457D8B  je   fail                  ; count == max -> full, reject
+```
+
+| Tag | Required? | Why |
+|---|---|---|
+| `CanBeOccupied=yes` | **YES** | first gate; without it nobody can ever enter |
+| `MaxNumberOccupants=X` | **YES, > 0** | the compare is `count == max → reject`. Left at 0, an *empty* building has `0 == 0` and is rejected, so nobody can enter |
+| `Passengers=X` | **NO** | different container entirely — that is the FootClass transport list (`Passengers.NumPassengers`). `GetOccupantCount` is `mov eax,[this+0x694]; ret`, i.e. `Occupants.Count` on the building instance |
+| `CanOccupyFire=yes` | **NO** (for PayloadExt) | only gates *vanilla's* occupy-fire and the `0x6FD150` ROF block. Entry does not check it, and the `Crew.*` feature reads `GetOccupantCount()` directly — so `CanOccupyFire=no` still admits infantry and still lets the crewed weapon see them |
+
+`BuildingClass::GetOccupantCount()` (vtable `+0x408` → `0x4581F0`) is literally
+`mov eax,[ecx+0x694]; ret` — it reads the **live** count off the building
+instance, not the Type, which is what makes the `0x6FD17B` divisor a genuine
+"more men = faster" and not a flat per-type bonus.
+
+`BuildingClass::CanOccupyFire()` (vtable `+0x400` → `0x458DD0`) =
+`CanBeOccupied && CanOccupyFire && GetOccupantCount() > 0`.
+
 ## 2. Implemented (v1, `src/Hooks.CrewedWeapon.cpp`)
 
 ```ini

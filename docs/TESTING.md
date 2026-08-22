@@ -116,8 +116,9 @@ so anything you see is PayloadExt's own gate and divisor.
    - ❌ If it shoots while empty, the CanFire gate is not working.
 2. Walk **one** infantry into it (right-click the pillbox with infantry selected).
    - **Look for:** it now fires, slowly — roughly **one shot every 2.5 s**.
-   - ⚠️ If infantry can't enter, `CanOccupyFire=no` may be blocking entry. Set it
-     to `yes` and retest — but note results then include the vanilla path.
+   - Entry is gated by `CanBeOccupied` and `MaxNumberOccupants` only — **not** by
+     `CanOccupyFire` (verified, see below), so `CanOccupyFire=no` does not block
+     infantry from entering.
 3. Add a **second**, then **third**, then **fourth** infantry.
    - **Look for:** fire rate visibly speeds up each time —
      ~2.5 s → ~1.25 s → ~0.83 s → ~0.63 s.
