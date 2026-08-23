@@ -1,23 +1,40 @@
-// Crewed weapon — the RA2-style garrison: a building that has its OWN weapon,
-// fires only while infantry are inside, and fires faster the more of them there
-// are. See docs/GARRISON.md.
+// RA2-style occupy fire — the BUILDING owns the garrison weapon and infantry
+// crew it. See docs/GARRISON.md.
 //
-// Vanilla already implements "more occupants = faster" inside
-// TechnoClass::RearmDelay, but only for the true occupy path:
+// Yuri's Revenge replaced RA2's system: in YR a garrisoned building fires the
+// OCCUPANT's InfantryTypeClass::OccupyWeapon. In RA2 the building itself carried
+// the weapon (CABUNK01: Primary=AlliedOccupyW / Secondary=SovietOccupyW) and the
+// infantry inside merely operated it, firing faster the more of them there were.
+// Both are useful; this adds RA2's back WITHOUT removing YR's.
 //
-//   0x6FD150  call [vtable+0x400]   ; TechnoClass::CanOccupyFire()
-//   0x6FD15C  je   0x6FD1B1         ; not occupy-firing -> no bonus at all
-//   0x6FD162  call [vtable+0x408]   ; TechnoClass::GetOccupantCount()
-//   0x6FD16A  jle  0x6FD183         ; count <= 0 -> skip
-//   0x6FD17B  idiv ecx              ; rof /= occupantCount
-//   0x6FD183  ...                   ; then flat RulesClass::OccupyROFMultiplier
+// The three engine facts this is built on (all objdump-verified):
 //
-// A building firing its own Primary= does not take that path, so we reproduce
-// the divisor ourselves — after vanilla's whole occupy/multiplier block, so we
-// never double-apply and never fight Phobos's hooks at 0x6FD183 / 0x6FD1C7.
+//  1. BuildingClass::CanFire @0x447F10
+//         mov cl,[Type+0x157B]   ; CanBeOccupied
+//         je  0x447F45           ; not occupiable -> normal path
+//         mov cl,[Type+0x157C]   ; CanOccupyFire
+//         je  0x44805A           ; occupiable + CanOccupyFire=no -> CANNOT FIRE
+//         call [vtable+0x408]    ; GetOccupantCount()
+//         je  0x44805A           ; occupiable + empty        -> CANNOT FIRE
+//     So CanOccupyFire=no does not merely disable YR's occupant firing, it stops
+//     the building firing at all. RA2 mode has to re-open that gate itself.
+//
+//  2. BuildingClass::GetWeapon @0x4526F0
+//         call [vtable+0x400]    ; CanOccupyFire()
+//         je  0x4527B4           ; FALSE -> base TechnoClass::GetWeapon = OWN weapon
+//         ...                    ; TRUE  -> the occupant's OccupyWeapon
+//     With CanOccupyFire=no the engine already hands back the building's own
+//     weapon, which is why a bare CABUNK01-style Primary=/Secondary= setup needs
+//     no weapon hook at all — only the GarrisonWeapon[] list does.
+//
+//  3. TechnoClass::RearmDelay @0x6FD150 divides the delay by the occupant count,
+//     but only when CanOccupyFire() is true — which it is not in RA2 mode, so we
+//     supply that divisor ourselves.
 
+#include <BuildingClass.h>
+#include <InfantryClass.h>
+#include <InfantryTypeClass.h>
 #include <TechnoClass.h>
-#include <TechnoTypeClass.h>
 
 #include <Utilities/Macro.h>
 
@@ -25,70 +42,110 @@
 
 namespace
 {
-	// GetOccupantCount() is a TechnoClass virtual (vtable +0x408). It is
-	// declared R0 in YRpp, but we call it *virtually* through the object, so
-	// dispatch lands on the game's real implementation — the R0 footgun only
-	// applies to qualified, vtable-bypassing calls. YRpp's own BuildingClass.h
-	// calls it exactly this way.
+	// GetOccupantCount() is a TechnoClass virtual (vtable +0x408). It is R0 in
+	// YRpp, but we call it *virtually*, so dispatch reaches the game's real
+	// implementation (`mov eax,[this+0x694]; ret`). The R0 footgun only applies
+	// to qualified, vtable-bypassing calls.
 	int OccupantsOf(TechnoClass* pThis)
 	{
 		return pThis->GetOccupantCount();
 	}
 
-	TechnoTypeExt::ExtData* CrewExt(TechnoClass* pThis)
+	TechnoTypeExt::ExtData* RA2GarrisonExt(TechnoClass* pThis)
 	{
-		const auto pType = pThis->GetTechnoType();
-		const auto pExt = TechnoTypeExt::ExtMap.Find(pType);
-
-		return (pExt && pExt->HasCrewLogic()) ? pExt : nullptr;
+		const auto pExt = TechnoTypeExt::Fetch(pThis);
+		return (pExt && pExt->UsesRA2Garrison()) ? pExt : nullptr;
 	}
 }
 
-// TechnoClass::CanFire — 0x6FC339. ESI = TechnoClass*.
-// CannotFire = 0x6FCB7E (the same exit Phobos uses from this address).
-// Antares, Ares, Kratos and Phobos all hook here; we only ever redirect for
-// types that explicitly opted in, and otherwise return 0 so they all chain.
+// ---------------------------------------------------------------------------
+// 1. Re-open the fire gate.
 //
-// This is the gate: "a building weapon that requires infantry inside".
-DEFINE_HOOK(0x6FC339, TechnoClass_CanFire_PayloadCrewGate, 0x6)
+// BuildingClass::CanFire @0x447F25 — the `mov cl,[eax+0x157C]` that reads
+// CanOccupyFire; exactly 6 bytes (8A 88 7C 15 00 00). EAX = BuildingTypeClass*,
+// ESI = the building. Unhooked by any framework (Antares' PrismForward is later
+// in the same function at 0x447FAE, Phobos' OmniFire at 0x447FED).
+//
+// In RA2 mode we replace vanilla's two checks with one: the building may fire
+// while it is crewed, regardless of CanOccupyFire.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x447F25, BuildingClass_CanFire_PayloadRA2Garrison, 0x6)
 {
-	enum { CannotFire = 0x6FCB7E };
+	enum { ContinueChecks = 0x447F45, CannotFire = 0x44805A };
 
 	GET(TechnoClass* const, pThis, ESI);
 
-	const auto pExt = CrewExt(pThis);
+	const auto pExt = RA2GarrisonExt(pThis);
 
-	if (!pExt || !pExt->Crew_Required.Get())
+	if (!pExt)
 		return 0;
 
-	// Fewer bodies inside than required -> the weapon is simply unmanned.
-	if (OccupantsOf(pThis) < pExt->Crew_MinOccupants.Get())
-		return CannotFire;
-
-	return 0;
+	return OccupantsOf(pThis) > 0 ? ContinueChecks : CannotFire;
 }
 
-// TechnoClass::RearmDelay — 0x6FD1B1, the join point AFTER vanilla's entire
-// occupy-ROF block (both the occupant-count divisor and the flat
-// OccupyROFMultiplier) and BEFORE the bunker block at 0x6FD1C7.
+// ---------------------------------------------------------------------------
+// 2. Pick the building's own garrison weapon.
 //
-// Verified in a clean gamemd.exe: the 6 stolen bytes are exactly
-//   8B 86 E4 02 00 00   mov eax, [esi+0x2E4]
-// ESI = TechnoClass*. On every path reaching here EBP holds the current rearm
-// delay, mirrored at [ESP+0x14] (vanilla writes `mov [esp+0x14], ebp` on each
-// branch, and Phobos's bunker hook reads it from that stack slot). We therefore
-// update BOTH so whoever reads next sees the same value.
+// BuildingClass::GetWeapon @0x452738 — the `call [edx+0x400]` (CanOccupyFire());
+// exactly 6 bytes (FF 92 00 04 00 00). ESI = the building, EBP = weapon index.
+// 0x4527B4 is the "use the building's own weapon" branch; 0x4527BC is the
+// balanced epilogue that returns EAX (prologue pushes ebx/ebp/esi/edi, and we
+// push nothing).
 //
-// Not hooked by any framework in the registry — chosen deliberately to avoid
-// arbitrating Phobos at 0x6FD183 / 0x6FD1C7.
-DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadCrewROF, 0x6)
+// Returning nullptr from PickGarrisonWeapon falls through to 0x4527B4, i.e. the
+// building's plain Primary=/Secondary= — which is precisely RA2's CABUNK01.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x452738, BuildingClass_GetWeapon_PayloadRA2Garrison, 0x6)
+{
+	enum { OwnWeapon = 0x4527B4, ReturnEAX = 0x4527BC };
+
+	GET(BuildingClass* const, pThis, ESI);
+
+	const auto pExt = RA2GarrisonExt(pThis);
+
+	if (!pExt)
+		return 0;
+
+	// Which occupant is currently manning it — the same index vanilla uses to
+	// pick the occupant's weapon and award XP.
+	InfantryTypeClass* pOccupantType = nullptr;
+	const int index = pThis->FiringOccupantIndex;
+
+	if (index >= 0 && index < pThis->Occupants.Count)
+	{
+		if (const auto pOccupant = pThis->Occupants[index])
+			pOccupantType = pOccupant->Type;
+	}
+
+	if (const auto pWeapon = pExt->PickGarrisonWeapon(pOccupantType))
+	{
+		R->EAX(pWeapon);
+		return ReturnEAX;
+	}
+
+	return OwnWeapon;
+}
+
+// ---------------------------------------------------------------------------
+// 3. "The more infantry inside, the faster it fires."
+//
+// TechnoClass::RearmDelay @0x6FD1B1 — the join point AFTER vanilla's whole
+// occupy block and BEFORE the bunker block at 0x6FD1C7. Stolen bytes are exactly
+// 8B 86 E4 02 00 00 (mov eax,[esi+0x2E4]); ESI = TechnoClass*. Unhooked by any
+// framework — chosen so we never arbitrate Phobos's REDIRECTING hooks at
+// 0x6FD183 / 0x6FD1C7.
+//
+// Vanilla's own divisor at 0x6FD17B is gated on CanOccupyFire(), which is false
+// in RA2 mode, so this cannot double-apply.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 {
 	GET(TechnoClass* const, pThis, ESI);
 	GET(int const, rof, EBP);
 
-	const auto pExt = CrewExt(pThis);
+	const auto pExt = RA2GarrisonExt(pThis);
 
-	if (!pExt || !pExt->Crew_ROFPerOccupant.Get())
+	if (!pExt || !pExt->Garrison_ROFPerOccupant.Get())
 		return 0;
 
 	int occupants = OccupantsOf(pThis);
@@ -96,16 +153,15 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadCrewROF, 0x6)
 	if (occupants <= 1)
 		return 0;
 
-	// Optional cap so a packed building isn't absurdly fast.
-	const int cap = pExt->Crew_ROFMaxOccupants.Get();
+	const int cap = pExt->Garrison_ROFMaxOccupants.Get();
 	if (cap > 0 && occupants > cap)
 		occupants = cap;
 
-	// Integer division, matching vanilla's `idiv` at 0x6FD17B — keeps this
-	// deterministic across machines (no floating point in logical state).
+	// Integer division, matching vanilla's idiv at 0x6FD17B — deterministic
+	// across machines, no floating point in logical state.
 	int scaled = rof / occupants;
 
-	// Never let the delay reach zero: a 0 rearm delay means "fire every frame".
+	// A rearm delay of 0 means "fire every frame".
 	if (scaled < 1)
 		scaled = 1;
 

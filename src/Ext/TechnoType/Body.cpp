@@ -1,6 +1,10 @@
 #include "Body.h"
 
+#include <utility>
+
 #include <TechnoClass.h>
+#include <InfantryTypeClass.h>
+#include <WeaponTypeClass.h>
 #include <Utilities/Macro.h>
 
 TechnoTypeExt::ExtContainer TechnoTypeExt::ExtMap;
@@ -10,20 +14,22 @@ TechnoTypeExt::ExtContainer TechnoTypeExt::ExtMap;
 //     mov eax, [esp+4]                 ; weapon index
 //     mov eax, [ecx + eax*4 + 0x814]   ; per-weapon turret index array
 //     retn 4
-// So the mapping Antares exposes as WeaponTurretIndex<N>= / <Name>TurretIndex=
-// is backed by a VANILLA array; Antares only hooks this to serve weapon
-// indices >= TechnoTypeClass::MaxWeapons (18) out of its own overflow vector.
-// We call through the address rather than reading +0x814 directly so that
-// Antares' overflow handling is honored when Antares is loaded.
+// The mapping Antares exposes as WeaponTurretIndex<N>= is backed by a VANILLA
+// array; Antares only hooks this to serve weapon indices >= MaxWeapons (18) out
+// of its own overflow vector. We call through the address rather than reading
+// +0x814 directly so Antares' overflow handling is honored when it is loaded.
 using GetWeaponTurretIndexFunc = int(__thiscall*)(TechnoTypeClass*, int);
 static const auto CallGetWeaponTurretIndex =
 	reinterpret_cast<GetWeaponTurretIndexFunc>(0x7178B0);
 
-// The engine keeps CurrentTurretNumber for itself on gattling units (it encodes
-// the gattling stage) and on charge-turret units (it encodes the charge
-// animation frame — this is the SREF pattern). Antares' own SwitchGunner hook
-// guards IsChargeTurret for exactly this reason. Writing it on those types
-// would fight the engine every frame, so we never do.
+TechnoTypeExt::ExtData* TechnoTypeExt::Fetch(TechnoClass* pThis)
+{
+	return pThis ? ExtMap.Find(pThis->GetTechnoType()) : nullptr;
+}
+
+// The engine keeps CurrentTurretNumber for itself on gattling units (gattling
+// stage) and charge-turret units (charge animation frame — the SREF pattern).
+// Antares' own SwitchGunner hook guards IsChargeTurret for the same reason.
 bool TechnoTypeExt::EngineOwnsTurretNumber(TechnoTypeClass* pType)
 {
 	return pType->IsGattling || pType->IsChargeTurret;
@@ -49,8 +55,6 @@ int TechnoTypeExt::ExtData::ResolveTurretIndex(TechnoClass* pThis, int weaponInd
 				++band;
 			}
 
-			// Indices holds one more entry than bands. A short list falls back
-			// to its last entry rather than reading out of bounds.
 			if (!this->Turret_RangeIndices.empty())
 			{
 				const size_t slot = band < this->Turret_RangeIndices.size()
@@ -59,7 +63,6 @@ int TechnoTypeExt::ExtData::ResolveTurretIndex(TechnoClass* pThis, int weaponInd
 				return this->Turret_RangeIndices[slot];
 			}
 
-			// No explicit index list: bands map straight onto turret indices.
 			return static_cast<int>(band);
 		}
 	}
@@ -68,6 +71,87 @@ int TechnoTypeExt::ExtData::ResolveTurretIndex(TechnoClass* pThis, int weaponInd
 		return CallGetWeaponTurretIndex(pType, weaponIndex);
 
 	return -1;
+}
+
+// Specific whitelist entries beat catch-all entries, so declaration order does
+// not force modders to put the catch-all last.
+WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOccupantType)
+{
+	auto excluded = [pOccupantType](const GarrisonWeaponEntry& entry)
+	{
+		for (auto const pExcluded : entry.Exclude)
+		{
+			if (pExcluded == pOccupantType)
+				return true;
+		}
+		return false;
+	};
+
+	// Pass 1 — an entry that names this infantry type explicitly.
+	if (pOccupantType)
+	{
+		for (auto& entry : this->GarrisonWeapons)
+		{
+			if (entry.Infantry.empty() || excluded(entry))
+				continue;
+
+			for (auto const pAllowed : entry.Infantry)
+			{
+				if (pAllowed == pOccupantType)
+					return &entry.Resolved;
+			}
+		}
+	}
+
+	// Pass 2 — the first catch-all entry that does not exclude this type.
+	for (auto& entry : this->GarrisonWeapons)
+	{
+		if (entry.Infantry.empty() && !excluded(entry))
+			return &entry.Resolved;
+	}
+
+	return nullptr;
+}
+
+// GarrisonWeapon=            + .Infantry= / .Exclude=
+// GarrisonWeapon[N]=         + .Infantry= / .Exclude=     (N = 0..31)
+// Indices may be sparse; a missing N is simply skipped.
+void TechnoTypeExt::ExtData::ReadGarrisonWeapons(INI_EX& exINI, const char* pSection)
+{
+	this->GarrisonWeapons.clear();
+
+	auto readEntry = [this, &exINI, pSection](const char* pBase)
+	{
+		char key[0x40];
+
+		// Read as a vector: that specialization uses WeaponTypeClass::FindOrAllocate,
+		// so a garrison weapon need not be registered in [WeaponTypes].
+		ValueableVector<WeaponTypeClass*> weapon;
+		weapon.Read(exINI, pSection, pBase);
+
+		if (weapon.empty() || !weapon[0])
+			return;
+
+		GarrisonWeaponEntry entry {};
+		entry.Resolved.WeaponType = weapon[0];
+
+		_snprintf_s(key, _TRUNCATE, "%s.Infantry", pBase);
+		entry.Infantry.Read(exINI, pSection, key);
+
+		_snprintf_s(key, _TRUNCATE, "%s.Exclude", pBase);
+		entry.Exclude.Read(exINI, pSection, key);
+
+		this->GarrisonWeapons.emplace_back(std::move(entry));
+	};
+
+	readEntry("GarrisonWeapon");
+
+	for (int i = 0; i < 32; ++i)
+	{
+		char base[0x30];
+		_snprintf_s(base, _TRUNCATE, "GarrisonWeapon[%d]", i);
+		readEntry(base);
+	}
 }
 
 void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
@@ -83,12 +167,15 @@ void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 	this->Turret_RangeBands.Read(exINI, pSection, "Turret.RangeBands");
 	this->Turret_RangeIndices.Read(exINI, pSection, "Turret.RangeIndices");
 
-	this->Crew_Required.Read(exINI, pSection, "Crew.Required");
-	this->Crew_MinOccupants.Read(exINI, pSection, "Crew.MinOccupants");
-	this->Crew_ROFPerOccupant.Read(exINI, pSection, "Crew.ROFPerOccupant");
-	this->Crew_ROFMaxOccupants.Read(exINI, pSection, "Crew.ROFMaxOccupants");
+	this->CanOccupyFire_RA2Mode.Read(exINI, pSection, "CanOccupyFire.RA2Mode");
+	this->Garrison_ROFPerOccupant.Read(exINI, pSection, "GarrisonWeapon.ROFPerOccupant");
+	this->Garrison_ROFMaxOccupants.Read(exINI, pSection, "GarrisonWeapon.ROFMaxOccupants");
+
+	this->ReadGarrisonWeapons(exINI, pSection);
 }
 
+// GarrisonWeapons is type data, re-parsed from INI on every load, so it is
+// deliberately NOT serialized. Save and Load stay symmetric.
 template <typename T>
 void TechnoTypeExt::ExtData::Serialize(T& Stm)
 {
@@ -96,10 +183,9 @@ void TechnoTypeExt::ExtData::Serialize(T& Stm)
 		.Process(this->Turret_FollowWeapon)
 		.Process(this->Turret_RangeBands)
 		.Process(this->Turret_RangeIndices)
-		.Process(this->Crew_Required)
-		.Process(this->Crew_MinOccupants)
-		.Process(this->Crew_ROFPerOccupant)
-		.Process(this->Crew_ROFMaxOccupants)
+		.Process(this->CanOccupyFire_RA2Mode)
+		.Process(this->Garrison_ROFPerOccupant)
+		.Process(this->Garrison_ROFMaxOccupants)
 		;
 }
 
@@ -123,8 +209,7 @@ TechnoTypeExt::ExtContainer::~ExtContainer() = default;
 
 // ============================================================================
 // Container lifecycle hooks — addresses as used by the sibling DLLs (verified
-// against Phobos develop). map-mode container: TryAllocate on ctor, Remove on
-// dtor, Prepare/Static on save/load, LoadFromINI on the type's INI read.
+// against Phobos develop).
 // ============================================================================
 
 DEFINE_HOOK(0x711835, TechnoTypeClass_CTOR_PayloadExt, 0x5)
