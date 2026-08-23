@@ -87,7 +87,56 @@ instance, not the Type, which is what makes the `0x6FD17B` divisor a genuine
 `BuildingClass::CanOccupyFire()` (vtable `+0x400` → `0x458DD0`) =
 `CanBeOccupied && CanOccupyFire && GetOccupantCount() > 0`.
 
-## 2. Implemented (v1, `src/Hooks.CrewedWeapon.cpp`)
+### 1b. ⚠ CORRECTION (2026-08-22, from a failed in-game test)
+
+The first test build produced a pillbox that **could not fire even when full**.
+Root cause was the INI, not the DLL — and it invalidates part of §2 below.
+
+**`BuildingClass::CanFire` (`0x447F10`) already gates on occupancy:**
+```asm
+447F15  mov  eax,[this+0x520]      ; ->Type
+447F1B  mov  cl,[eax+0x157B]       ; CanBeOccupied
+447F23  je   0x447F45              ; not occupiable -> normal path
+447F25  mov  cl,[eax+0x157C]       ; CanOccupyFire
+447F2D  je   0x44805A              ; occupiable + CanOccupyFire=no -> CANNOT FIRE
+447F37  call [vtable+0x408]        ; GetOccupantCount()
+447F3F  je   0x44805A              ; occupiable + empty      -> CANNOT FIRE
+```
+
+Two consequences:
+
+1. **`CanBeOccupied=yes` + `CanOccupyFire=no` = a building that can never fire,
+   period.** This is a hard vanilla block, hit before anything we do. My earlier
+   claim that `CanOccupyFire` "only gates vanilla's occupy-firing" was **wrong**;
+   it also gates the building's own `CanFire`.
+2. With `CanOccupyFire=yes`, **vanilla already implements "requires infantry
+   inside"** (`0x447F3F`) *and* "more infantry = faster" (`0x6FD17B`).
+
+**So `Crew.Required` and `Crew.ROFPerOccupant` are both redundant** — and worse,
+`Crew.ROFPerOccupant` would divide the rearm delay a *second* time on top of
+vanilla's divisor. Both are disabled in the test rules pending the rewrite.
+
+**The one thing vanilla genuinely will not do** is let the building fire its *own*
+weapon while occupied. `BuildingClass::GetWeapon` (`0x4526F0`):
+```asm
+452738  call [vtable+0x400]        ; CanOccupyFire()  (= CanBeOccupied && CanOccupyFire && count>0)
+452740  je   0x4527B4              ; false -> base TechnoClass::GetWeapon = building's OWN weapon
+452742  mov  eax,[this+0x69C]      ; else FiringOccupantIndex
+452752  mov  ecx,[this+0x688]      ; Occupants.Items
+452770  mov  ecx,[occType+0xE20]   ; the OCCUPANT's OccupyWeapon
+452785  call [occ_vtable+0x3F8]    ; (fallback) the occupant's own weapon
+```
+There is **no vanilla configuration** in which a garrisonable building fires its
+own `Primary=`: `CanOccupyFire=no` makes it fire nothing at all, and
+`CanOccupyFire=yes` makes it fire the occupant's weapon.
+
+**Therefore the redesign:** require `CanOccupyFire=yes` (inherit vanilla's gate
+and ROF divisor for free) and have PayloadExt override **only** weapon selection —
+hook `0x452738`/`0x452740` so an opted-in building takes the `0x4527B4` branch and
+uses its own weapon. That is a much smaller feature than v1, and it composes with
+vanilla instead of duplicating it.
+
+## 2. Implemented (v1, `src/Hooks.CrewedWeapon.cpp`) — SUPERSEDED, see §1b
 
 ```ini
 [GACNST]                    ; any BuildingType that has its own weapon
