@@ -96,7 +96,54 @@ applies it on the gunner/IFV path, so a normal vehicle never switched turrets.
 
 ---
 
-## TEST C — crewed building weapon (the RA2 garrison ask) ★ main event
+## TESTS C & D — RA2 mode vs YR mode, side by side ★ main event
+### (rewritten 2026-08-22 for the RA2Mode build — supersedes the old Crew.* text below)
+
+The point of the pair is that **both systems now exist and are chosen per
+building**.
+
+**`[GAPILL]` Allied Pill Box = RA2 mode** (`CanOccupyFire=no` +
+`CanOccupyFire.RA2Mode=yes`): the *building* owns the gun, infantry crew it.
+```ini
+GarrisonWeapon[0]=PXCrewGun        ; catch-all
+GarrisonWeapon[0].Exclude=E1       ; ...but not GI
+GarrisonWeapon[1]=PXCrewGunHeavy   ; GI only  (loud cannon, easy to hear)
+GarrisonWeapon[1].Infantry=E1
+GarrisonWeapon.ROFPerOccupant=yes
+```
+
+**`[NABNKR]` Soviet Battle Bunker = YR mode** (untouched, `CanOccupyFire=yes`):
+fires the *occupant's* weapon. It carries a `Primary=` purely to demonstrate that
+YR mode ignores it.
+
+**Do, in order:**
+
+1. Build a Pill Box, leave it **empty**, put a target in range.
+   - **Look for:** it does not fire. (Vanilla would refuse anyway with
+     `CanOccupyFire=no`; RA2 mode re-opens that gate only when crewed.)
+2. Put **one Conscript** (or any non-GI infantry) inside.
+   - **Look for:** it fires `PXCrewGun` — the light machine-gun report, ~1 shot
+     per 2.5 s. This is the headline result: **a building firing its own weapon
+     because infantry are inside it.**
+3. Now use a **GI (E1)** instead.
+   - **Look for:** a visibly/audibly different shot — `PXCrewGunHeavy`, a loud
+     cannon with a shell projectile. That proves `GarrisonWeapon[N].Infantry` /
+     `.Exclude` selection works.
+4. Fill it to **4** occupants.
+   - **Look for:** the fire rate climbing ~2.5 s → ~0.63 s. Count shots per 10 s
+     (1 crew ≈ 4, 4 crew ≈ 16) rather than eyeballing.
+5. Empty it again → it stops firing.
+6. **Now the Battle Bunker.** Garrison it and watch.
+   - **Look for:** it fires the *infantry's* weapon (ordinary GI/Conscript sounds),
+     **not** `PXCrewGun`, and still speeds up with more men. That is YR mode
+     working untouched, next to RA2 mode.
+
+**If the pillbox still will not fire at all**, the RA2Mode gate at `0x447F25` is
+not engaging — send `debug.log` and say which infantry you used.
+
+---
+
+## OLD TEST C text (superseded — the `Crew.*` tags no longer exist)
 
 Applied to `[GAPILL]` (Allied Pill Box): it now uses a deliberately slow gun
 (`PXCrewGun`, ROF=150 ≈ 2.5 s) and:
