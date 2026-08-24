@@ -1,4 +1,21 @@
-# Garrison — the RA2-style crewed building weapon
+# Garrison — three in-building firing systems
+
+PayloadExt now supports **three**, chosen per building. They are genuinely
+different mechanics, not variants:
+
+| Mode | Who owns the weapon | How it fires | INI |
+|---|---|---|---|
+| **YR garrison** (stock) | the **occupant** (`OccupyWeapon`) | building fires ONE shared weapon, round-robining the crew | `CanOccupyFire=yes` |
+| **RA2 mode** (§2) | the **building** | building fires its own weapon, faster per crewman | `CanOccupyFire=no` + `CanOccupyFire.RA2Mode=yes` |
+| **OpenTopped** (§3) | each **occupant**, independently | every occupant fires its OWN weapon out simultaneously, like BFRT passengers | `CanOccupyFire=no` + `OpenTopped=yes` |
+
+RA2 mode and OpenTopped are mirror images: one makes the structure the gun and the
+infantry the crew, the other makes the structure a firing position and the
+infantry the guns.
+
+---
+
+## Original: the RA2-style crewed building weapon
 
 Rex's spec:
 
@@ -282,3 +299,48 @@ because Phobos's bunker hook reads that stack slot.
 - `0x6FC339` register convention + `CannotFire` exit: from Phobos's own hook at
   that address.
 - **Not compiled, not run in game.** No behaviour here has been observed.
+
+---
+
+## 3. OpenTopped buildings (`src/Hooks.OpenToppedBuilding.cpp`)
+
+The BFRT pattern for structures: each occupant fires **its own** weapon out,
+independently and simultaneously — rather than the building round-robining one
+shared occupy-weapon.
+
+```ini
+[Building]
+CanBeOccupied=yes
+MaxNumberOccupants=6
+OpenTopped=yes        ; occupants shoot out, exactly as BFRT does
+CanOccupyFire=no      ; keep the BUILDING itself silent (0x447F2D)
+```
+
+`OpenTopped` is a `TechnoTypeClass` field, so it **already exists on every
+BuildingType** and the engine simply never acts on it there — setting it on a
+building is a vanilla no-op. That makes it safe to reuse as the opt-in, and keeps
+the spelling identical to BFRT.
+
+### Why this needs code at all
+`TechnoClass::EnteredOpenTopped` (`0x710470`) sets `InOpenToppedTransport`
+(`+0x82`) and — the essential part — adds the passenger to
+`LogicClass::Instance` (`0x87F778`) so it keeps receiving `Update()` ticks while
+limboed. From there all the ordinary open-topped machinery applies. Buildings
+hold their infantry in `Occupants` rather than `Passengers`, so this never runs
+for them; we submit each occupant on entry and withdraw it on exit.
+
+### Hook points
+| Address | Role |
+|---|---|
+| `0x52297F` `InfantryClass::GarrisonBuilding` | entry: set `Transporter`, call `EnteredOpenTopped`. `EBP` = building, `ESI` = the infantry just appended. Antares hooks the same address; we return 0 so both chain. |
+| `0x4580BD` unload loop | exit: `ExitedOpenTopped` + clear `Transporter`. `EDI` = `Occupants.Items[EBP]` (loaded at `0x4580B1`). Driven from the occupant alone, since `ExitedOpenTopped` ignores its `this`. |
+| `0x457D48` `CanBeOccupiedBy` | the `Occupier.RA2Mode` permission now covers OpenTopped buildings too. |
+
+### Known gaps / risks (untested)
+- **Occupant death inside the building** is not explicitly withdrawn from the
+  logic layer; the object is being destroyed anyway, but `KillOccupiers`
+  (`0x4586D6`) may deserve a hook if anything misbehaves.
+- Each occupant targets independently, so a building can engage several targets
+  at once. That is the point, but it is a real balance change.
+- `Transporter` pointing at a *building* is a configuration the engine never
+  produces on its own. If something asserts on it, this is the first suspect.
