@@ -136,7 +136,86 @@ hook `0x452738`/`0x452740` so an opted-in building takes the `0x4527B4` branch a
 uses its own weapon. That is a much smaller feature than v1, and it composes with
 vanilla instead of duplicating it.
 
-## 2. Implemented (v1, `src/Hooks.CrewedWeapon.cpp`) — SUPERSEDED, see §1b
+### 1c. Mixed crews — what actually fires? (answered from the engine)
+
+`TechnoClass::Fire` at `0x6FF065` advances the crewman after **every shot**:
+
+```asm
+6FF06D  inc eax                 ; ++FiringOccupantIndex
+6FF074  call [vtable+0x408]     ; GetOccupantCount()
+6FF083  idiv ecx                ; index %= count
+6FF085  mov [edi+0x69C],edx     ; wrap
+```
+
+So the building **round-robins through its crew, one shot each** — that is stock
+engine behaviour, and RA2 mode inherits it because `GetWeapon` reads the same
+`FiringOccupantIndex`.
+
+**With an E1 and an E2 inside** (E1 → `GarrisonWeapon[1]`, E2 → `[0]`), the
+building **alternates**: shot 1 heavy, shot 2 light, shot 3 heavy… Add a third
+crewman and it cycles through all three. Kill one and the cycle shortens
+immediately. This is also why `GarrisonWeapon[N].ROFMultiplier` is per-entry: the
+delay after each shot belongs to whoever just fired it.
+
+### 1d. Who may crew it — `Occupier.RA2Mode`
+
+Vanilla gates garrison entry on `InfantryTypeClass::Occupier` (`+0xEB4`), read in
+`CanBeOccupiedBy` at `0x457D4E`; if clear, the infantryman is diverted to the
+*assault* branch and simply cannot enter. Vanilla only sets `Occupier=yes` on
+**E1, E2 and INIT**, which would make RA2 mode useless for every other type.
+
+```ini
+[General]
+Occupier.RA2Mode.Default=yes   ; global default (default: yes)
+
+[SomeInfantry]
+Occupier.RA2Mode=no            ; keep this type out
+```
+
+Only applies to buildings in RA2 mode; YR-mode garrisons keep vanilla's
+`Occupier=` rule untouched.
+
+## 2. Implemented (v2, `src/Hooks.CrewedWeapon.cpp`)
+
+```ini
+[Building]
+CanBeOccupied=yes
+MaxNumberOccupants=4
+CanOccupyFire=no                      ; YR's occupant-weapon system OFF
+CanOccupyFire.RA2Mode=yes             ; RA2's building-weapon system ON
+CanOccupyFire.RA2Mode.MinOccupants=1  ; 0 = also fires while empty, at base rate
+GarrisonWeapon.ROFPerOccupant=yes     ; default yes -- the RA2 feel
+GarrisonWeapon.ROFMaxOccupants=0      ; 0 = uncapped
+
+GarrisonWeapon[0]=LightGun            ; catch-all (empty .Infantry)
+GarrisonWeapon[0].Exclude=E1
+GarrisonWeapon[0].ROFMultiplier=1.0
+GarrisonWeapon[1]=HeavyGun
+GarrisonWeapon[1].Infantry=E1         ; GI only
+GarrisonWeapon[1].ROFMultiplier=2.0   ; >1 slower, <1 faster
+```
+
+An empty `GarrisonWeapon` list falls through to plain `Primary=`/`Secondary=` —
+literal RA2 `CABUNK01`.
+
+### Hook points
+
+| Address | Function | Role |
+|---|---|---|
+| `0x457D48` | `BuildingClass::CanBeOccupiedBy` | let non-`Occupier=` infantry crew an RA2-mode garrison (rejoins at `0x457D58`, so Antares' hook still runs) |
+| `0x447F25` | `BuildingClass::CanFire` | re-open the gate `CanOccupyFire=no` slams shut at `0x447F2D`; fire iff crew ≥ MinOccupants |
+| `0x452738` | `BuildingClass::GetWeapon` | return the building's garrison weapon; `nullptr` → `0x4527B4` = own weapon |
+| `0x6FD1B1` | `TechnoClass::RearmDelay` | occupant-count divisor + per-entry ROFMultiplier |
+| `0x679A15` | rules load | `[General]` defaults |
+
+### Still to do
+- **Firepower / Range per entry.** Needs separate hooks (damage application and
+  weapon-range calculation) keyed to the active entry; not yet written.
+- **OpenTopped buildings** (the BFRT `OpenTopped=yes` pattern — infantry inside
+  fire *their own* weapon out). That is the mirror image of RA2 mode and is
+  tracked separately in OPENTOPPED_RESEARCH.md.
+
+## OLD v1 notes — SUPERSEDED, see §1b
 
 ```ini
 [GACNST]                    ; any BuildingType that has its own weapon
