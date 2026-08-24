@@ -79,7 +79,18 @@ DEFINE_HOOK(0x457D48, BuildingClass_CanBeOccupiedBy_PayloadRA2Occupier, 0x6)
 	GET(TechnoClass* const, pThis, ESI);
 	GET(InfantryClass* const, pInfantry, EDI);
 
-	if (!RA2GarrisonExt(pThis) || !pInfantry)
+	if (!pInfantry)
+		return 0;
+
+	// Applies to BOTH PayloadExt garrison modes: RA2 mode (building's weapon)
+	// and OpenTopped buildings (occupants fire their own). Plain YR garrisons
+	// keep vanilla's Occupier= rule untouched.
+	const auto pType = pThis ? pThis->GetTechnoType() : nullptr;
+	const auto pBldExt = TechnoTypeExt::Fetch(pThis);
+	const bool payloadGarrison =
+		(pBldExt && pBldExt->UsesRA2Garrison()) || (pType && pType->OpenTopped);
+
+	if (!payloadGarrison)
 		return 0;
 
 	const auto pInfExt = TechnoTypeExt::ExtMap.Find(pInfantry->Type);
