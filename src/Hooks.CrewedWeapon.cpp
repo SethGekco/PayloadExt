@@ -59,6 +59,40 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
+// 0. Let ordinary infantry crew an RA2-mode garrison.
+//
+// BuildingClass::CanBeOccupiedBy @0x457D48 — `mov eax,[edi+0x6C0]` (the
+// infantry's Type), exactly 6 bytes (8B 87 C0 06 00 00). ESI = building,
+// EDI = infantry. Vanilla then reads InfantryTypeClass+0xEB4 (`Occupier=`) and,
+// if clear, diverts to the ASSAULT branch at 0x457DAD — so a non-Occupier type
+// can never garrison. Vanilla only sets Occupier= on E1/E2/INIT, which would
+// make RA2 mode unusable for every other infantry type.
+//
+// Returning 0x457D58 skips only the Occupier test and rejoins the normal
+// occupier path (EAX is immediately overwritten there, so not setting it is
+// safe). Antares' own hook at 0x457D58 still runs.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x457D48, BuildingClass_CanBeOccupiedBy_PayloadRA2Occupier, 0x6)
+{
+	enum { SkipOccupierCheck = 0x457D58 };
+
+	GET(TechnoClass* const, pThis, ESI);
+	GET(InfantryClass* const, pInfantry, EDI);
+
+	if (!RA2GarrisonExt(pThis) || !pInfantry)
+		return 0;
+
+	const auto pInfExt = TechnoTypeExt::ExtMap.Find(pInfantry->Type);
+
+	// Defaults to [General]->Occupier.RA2Mode.Default (yes), so RA2 mode works
+	// out of the box; set Occupier.RA2Mode=no to keep a type out.
+	if (pInfExt && pInfExt->AllowsRA2Occupy())
+		return SkipOccupierCheck;
+
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
 // 1. Re-open the fire gate.
 //
 // BuildingClass::CanFire @0x447F25 — the `mov cl,[eax+0x157C]` that reads
@@ -80,7 +114,9 @@ DEFINE_HOOK(0x447F25, BuildingClass_CanFire_PayloadRA2Garrison, 0x6)
 	if (!pExt)
 		return 0;
 
-	return OccupantsOf(pThis) > 0 ? ContinueChecks : CannotFire;
+	// MinOccupants=0 lets the building fire while empty at its base rate.
+	return OccupantsOf(pThis) >= pExt->Garrison_MinOccupants.Get()
+		? ContinueChecks : CannotFire;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,10 +184,30 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 	if (!pExt || !pExt->Garrison_ROFPerOccupant.Get())
 		return 0;
 
+	// Per-entry ROFMultiplier for whoever is currently manning the weapon.
+	double perEntry = 1.0;
+
+	if (const auto pBuilding = abstract_cast<BuildingClass*>(pThis))
+	{
+		const int index = pBuilding->FiringOccupantIndex;
+
+		if (index >= 0 && index < pBuilding->Occupants.Count)
+		{
+			if (const auto pOccupant = pBuilding->Occupants[index])
+			{
+				if (const auto pEntry = pExt->PickGarrisonEntry(pOccupant->Type))
+					perEntry = pEntry->ROFMultiplier.Get();
+			}
+		}
+	}
+
 	int occupants = OccupantsOf(pThis);
 
-	if (occupants <= 1)
+	if (occupants <= 1 && perEntry == 1.0)
 		return 0;
+
+	if (occupants < 1)
+		occupants = 1;
 
 	const int cap = pExt->Garrison_ROFMaxOccupants.Get();
 	if (cap > 0 && occupants > cap)
@@ -159,7 +215,7 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 
 	// Integer division, matching vanilla's idiv at 0x6FD17B — deterministic
 	// across machines, no floating point in logical state.
-	int scaled = rof / occupants;
+	int scaled = static_cast<int>((rof / occupants) * perEntry);
 
 	// A rearm delay of 0 means "fire every frame".
 	if (scaled < 1)

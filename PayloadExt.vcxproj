@@ -29,6 +29,7 @@
     <ClCompile Include="Phobos\src\Utilities\Stream.cpp" />
     <ClCompile Include="Phobos\src\Utilities\Patch.cpp" />
     <!-- Turret index selectors -->
+    <ClCompile Include="src\Ext\Rules\Body.cpp" />
     <ClCompile Include="src\Ext\TechnoType\Body.cpp" />
     <ClCompile Include="src\Hooks.Turrets.cpp" />
     <!-- RA2-style garrison: building weapon crewed by occupants -->
@@ -39,6 +40,7 @@
   <ItemGroup>
     <ClInclude Include="src\PayloadExt.h" />
     <ClInclude Include="src\Ext\TechnoType\Body.h" />
+    <ClInclude Include="src\Ext\Rules\Body.h" />
   </ItemGroup>
 
   <PropertyGroup Label="Globals">

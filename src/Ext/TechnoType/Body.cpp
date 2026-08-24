@@ -7,6 +7,8 @@
 #include <WeaponTypeClass.h>
 #include <Utilities/Macro.h>
 
+#include <Ext/Rules/Body.h>
+
 TechnoTypeExt::ExtContainer TechnoTypeExt::ExtMap;
 
 // TechnoTypeClass::GetWeaponTurretIndex(int weapon) — vanilla __thiscall at
@@ -73,9 +75,21 @@ int TechnoTypeExt::ExtData::ResolveTurretIndex(TechnoClass* pThis, int weaponInd
 	return -1;
 }
 
+bool TechnoTypeExt::ExtData::AllowsRA2Occupy() const
+{
+	return this->Occupier_RA2Mode.Get(
+		RulesExt::Global()->RA2Garrison_OccupierDefault.Get());
+}
+
+WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOccupantType)
+{
+	const auto pEntry = this->PickGarrisonEntry(pOccupantType);
+	return pEntry ? &pEntry->Resolved : nullptr;
+}
+
 // Specific whitelist entries beat catch-all entries, so declaration order does
 // not force modders to put the catch-all last.
-WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOccupantType)
+TechnoTypeExt::GarrisonWeaponEntry* TechnoTypeExt::ExtData::PickGarrisonEntry(InfantryTypeClass* pOccupantType)
 {
 	auto excluded = [pOccupantType](const GarrisonWeaponEntry& entry)
 	{
@@ -98,7 +112,7 @@ WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOcc
 			for (auto const pAllowed : entry.Infantry)
 			{
 				if (pAllowed == pOccupantType)
-					return &entry.Resolved;
+					return &entry;
 			}
 		}
 	}
@@ -107,7 +121,7 @@ WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOcc
 	for (auto& entry : this->GarrisonWeapons)
 	{
 		if (entry.Infantry.empty() && !excluded(entry))
-			return &entry.Resolved;
+			return &entry;
 	}
 
 	return nullptr;
@@ -141,6 +155,9 @@ void TechnoTypeExt::ExtData::ReadGarrisonWeapons(INI_EX& exINI, const char* pSec
 		_snprintf_s(key, _TRUNCATE, "%s.Exclude", pBase);
 		entry.Exclude.Read(exINI, pSection, key);
 
+		_snprintf_s(key, _TRUNCATE, "%s.ROFMultiplier", pBase);
+		entry.ROFMultiplier.Read(exINI, pSection, key);
+
 		this->GarrisonWeapons.emplace_back(std::move(entry));
 	};
 
@@ -170,6 +187,8 @@ void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 	this->CanOccupyFire_RA2Mode.Read(exINI, pSection, "CanOccupyFire.RA2Mode");
 	this->Garrison_ROFPerOccupant.Read(exINI, pSection, "GarrisonWeapon.ROFPerOccupant");
 	this->Garrison_ROFMaxOccupants.Read(exINI, pSection, "GarrisonWeapon.ROFMaxOccupants");
+	this->Garrison_MinOccupants.Read(exINI, pSection, "CanOccupyFire.RA2Mode.MinOccupants");
+	this->Occupier_RA2Mode.Read(exINI, pSection, "Occupier.RA2Mode");
 
 	this->ReadGarrisonWeapons(exINI, pSection);
 }
@@ -186,6 +205,8 @@ void TechnoTypeExt::ExtData::Serialize(T& Stm)
 		.Process(this->CanOccupyFire_RA2Mode)
 		.Process(this->Garrison_ROFPerOccupant)
 		.Process(this->Garrison_ROFMaxOccupants)
+		.Process(this->Garrison_MinOccupants)
+		.Process(this->Occupier_RA2Mode)
 		;
 }
 

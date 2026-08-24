@@ -33,6 +33,9 @@ public:
 		ValueableVector<InfantryTypeClass*> Infantry {};
 		// Blacklist, applied on top of the whitelist.
 		ValueableVector<InfantryTypeClass*> Exclude {};
+		// Per-entry rate-of-fire scale for the crewman manning THIS weapon.
+		// >1 = slower, <1 = faster. Applied on top of the occupant-count divisor.
+		Valueable<double> ROFMultiplier { 1.0 };
 	};
 
 	class ExtData final : public Extension<TechnoTypeClass>
@@ -59,15 +62,27 @@ public:
 		// RA2's signature behaviour: the more occupants, the faster it fires.
 		Valueable<bool> Garrison_ROFPerOccupant;
 		Valueable<int> Garrison_ROFMaxOccupants;   // 0 = uncapped
+		// How many crew are needed before it fires at all. 1 = RA2 default
+		// ("silent while empty"); 0 = it always fires, just at its base rate,
+		// and extra crew only speed it up.
+		Valueable<int> Garrison_MinOccupants;
 
 		std::vector<GarrisonWeaponEntry> GarrisonWeapons;
 
+		// InfantryType side: may this infantry enter an RA2-mode garrison?
+		// Vanilla `Occupier=` is only set on E1/E2/INIT, so RA2 mode uses its own
+		// flag, defaulting to [General]->Occupier.RA2Mode.Default (yes).
+		Nullable<bool> Occupier_RA2Mode;
+
 		bool UsesRA2Garrison() const { return this->CanOccupyFire_RA2Mode.Get(); }
+		bool AllowsRA2Occupy() const;
 
 		// Picks the garrison weapon for the given occupant type, or nullptr to
 		// fall back to the building's own Primary=/Secondary= (which is exactly
 		// how RA2's CABUNK01 worked, so an empty list is a valid setup).
 		WeaponStruct* PickGarrisonWeapon(InfantryTypeClass* pOccupantType);
+		// The entry that would be chosen, so callers can read its modifiers.
+		GarrisonWeaponEntry* PickGarrisonEntry(InfantryTypeClass* pOccupantType);
 
 		ExtData(TechnoTypeClass* OwnerObject) : Extension<TechnoTypeClass>(OwnerObject)
 			, Turret_FollowWeapon { false }
@@ -76,7 +91,9 @@ public:
 			, CanOccupyFire_RA2Mode { false }
 			, Garrison_ROFPerOccupant { true }
 			, Garrison_ROFMaxOccupants { 0 }
+			, Garrison_MinOccupants { 1 }
 			, GarrisonWeapons {}
+			, Occupier_RA2Mode {}
 		{ }
 
 		virtual ~ExtData() = default;
