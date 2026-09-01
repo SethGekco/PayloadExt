@@ -62,16 +62,31 @@ DEFINE_HOOK(0x6FDDC0, TechnoClass_FireAt_PayloadTurretIndex, 0x6)
 	return 0;
 }
 
-// TechnoClass::Update — 0x6F9E50. Verified function start in a clean
-// gamemd.exe: `sub esp,0x68 / push ebx / push ebp` is exactly the 5 stolen
-// bytes, and ECX holds the TechnoClass* (`mov esi, ecx` follows).
-// Antares, Ares, Kratos and Phobos all hook this same entry point already —
-// it is the canonical benign shared call site, and we return 0 like they do.
-// This drives the range-based selector, which must track a moving target
-// continuously rather than only updating when the unit fires.
-DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadTurretIndex, 0x5)
+// The per-frame selector must run AFTER the engine's charge-turret block, not
+// at the top of TechnoClass::AI.
+//
+// This used to hook the function entry (0x6F9E50). That looked right and was
+// wrong: the charge-turret code at 0x6FA540-0x6FA5B8 lives INSIDE the same
+// function (TechnoClass::AI runs 0x6F9E50-0x6FAF81), and it ends with
+// `mov [esi+0x124], edi` — an unconditional store to CurrentTurretNumber. So
+// our value was overwritten later in the very same tick, every frame.
+//
+// Crucially that block is NOT gated on IsChargeTurret. Its only guards are:
+//     0x6FA51F  call 0x717880   -> returns pType->TurretCount > 0
+//     0x6FA536  test [type+0xCD5] -> IsGattling, skip if set
+// so every multi-turret non-gattling unit reaches it, and when
+// ChargeTurretDelay <= 0 (i.e. it has not fired yet) the store writes 0.
+// That is the whole bug: a Prism Tank showed turret 0 until it first fired,
+// because only the FireAt hook below could get a value in edgewise.
+//
+// 0x6FA5BE is the convergence point immediately after that store — both guard
+// branches (`je`/`jne` at 0x6FA526/0x6FA53E) jump here too, and it is also the
+// address Phobos's own replacement of the block returns to, so this runs
+// whether or not Phobos owns 0x6FA540. Stolen bytes: `lea edi,[esi+0x350]`
+// (6 bytes, resumes cleanly at 0x6FA5C4). ESI = TechnoClass* on every path in.
+DEFINE_HOOK(0x6FA5BE, TechnoClass_AI_AfterChargeTurret_PayloadTurretIndex, 0x6)
 {
-	GET(TechnoClass* const, pThis, ECX);
+	GET(TechnoClass* const, pThis, ESI);
 
 	// -1 = "not firing"; the range selector does not need a weapon index.
 	ApplyTurretIndex(pThis, -1);
