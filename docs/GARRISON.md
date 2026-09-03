@@ -209,8 +209,39 @@ GarrisonWeapon[0].Exclude=E1
 GarrisonWeapon[0].ROFMultiplier=1.0
 GarrisonWeapon[1]=HeavyGun
 GarrisonWeapon[1].Infantry=E1         ; GI only
-GarrisonWeapon[1].ROFMultiplier=2.0   ; >1 slower, <1 faster
+GarrisonWeapon[1].ROFMultiplier=2.0        ; >1 slower, <1 faster
+GarrisonWeapon[1].FirepowerMultiplier=2.0  ; scales that crewman's damage
+GarrisonWeapon[1].RangeBonus=2             ; in CELLS, may be negative
 ```
+
+### Per-entry modifiers
+
+All three key off **whoever is manning the weapon at that moment**. Since the
+engine round-robins the crew one shot at a time (§1c), a mixed crew produces
+genuinely alternating damage, reach and cadence — a GI burst that is slow but
+heavy, followed by a Conscript burst that is fast but light.
+
+| Tag | Effect | Hook |
+|---|---|---|
+| `.ROFMultiplier` | reload time × N (on top of the occupant-count divisor) | `0x6FD1B1` |
+| `.FirepowerMultiplier` | damage × N, floored at 1 so a real hit never rounds to nothing | `0x6FE460` |
+| `.RangeBonus` | ± cells of weapon range | `0x6F72EF` |
+
+Both new hooks sit at **convergence points after vanilla's own modifiers**, so
+they compose rather than fight:
+- `0x6FE460` is past the Occupy (`0x6FE3F1`), Bunker (`0x6FE421`) and OpenTopped
+  (`0x6FE43B`) damage multipliers — all three Phobos-owned. Damage lives in `EDI`
+  and is mirrored at `[ESP+0x2C]`; we write both.
+- `0x6F72EF` is past the occupy (`RulesClass+0xF54`) and open-topped (`+0xF5C`)
+  range bonuses. Deliberately **not** `0x6F72E3`, which Kratos owns; by `0x6F72EF`
+  the range has moved into `EBX`. Values are leptons, hence `<< 8`.
+
+⚠ **Caveat on `RangeBonus`:** `InRange` is consulted during target *acquisition*,
+not only when firing. Because the active crewman rotates, a building with very
+different `RangeBonus` values across entries has a reach that flickers shot to
+shot, which can make it acquire and then drop a target at the margin. Keep the
+spread small, or leave `RangeBonus` off entries that share a building, until this
+is tested.
 
 An empty `GarrisonWeapon` list falls through to plain `Primary=`/`Secondary=` —
 literal RA2 `CABUNK01`.
