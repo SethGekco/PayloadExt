@@ -33,9 +33,15 @@ public:
 		ValueableVector<InfantryTypeClass*> Infantry {};
 		// Blacklist, applied on top of the whitelist.
 		ValueableVector<InfantryTypeClass*> Exclude {};
-		// Per-entry rate-of-fire scale for the crewman manning THIS weapon.
-		// >1 = slower, <1 = faster. Applied on top of the occupant-count divisor.
+		// Per-entry modifiers for the crewman manning THIS weapon. All are
+		// applied only while that crewman is the one firing (the engine
+		// round-robins the crew, one shot each).
+		// >1 = slower, <1 = faster. On top of the occupant-count divisor.
 		Valueable<double> ROFMultiplier { 1.0 };
+		// Scales the damage of the shot this crewman fires.
+		Valueable<double> FirepowerMultiplier { 1.0 };
+		// Added to the weapon's range, in CELLS. May be negative.
+		Valueable<int> RangeBonus { 0 };
 	};
 
 	class ExtData final : public Extension<TechnoTypeClass>

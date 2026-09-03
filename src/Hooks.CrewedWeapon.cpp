@@ -56,6 +56,32 @@ namespace
 		const auto pExt = TechnoTypeExt::Fetch(pThis);
 		return (pExt && pExt->UsesRA2Garrison()) ? pExt : nullptr;
 	}
+
+	// The garrison entry belonging to whoever is manning the weapon right now.
+	// The engine round-robins FiringOccupantIndex one shot at a time
+	// (TechnoClass::Fire @0x6FF065), so this changes shot to shot on a mixed
+	// crew — which is exactly what makes the per-entry modifiers meaningful.
+	TechnoTypeExt::GarrisonWeaponEntry* ActiveGarrisonEntry(TechnoClass* pThis)
+	{
+		const auto pExt = RA2GarrisonExt(pThis);
+
+		if (!pExt)
+			return nullptr;
+
+		const auto pBuilding = abstract_cast<BuildingClass*>(pThis);
+
+		if (!pBuilding)
+			return nullptr;
+
+		const int index = pBuilding->FiringOccupantIndex;
+
+		if (index < 0 || index >= pBuilding->Occupants.Count)
+			return nullptr;
+
+		const auto pOccupant = pBuilding->Occupants[index];
+
+		return pOccupant ? pExt->PickGarrisonEntry(pOccupant->Type) : nullptr;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -198,19 +224,8 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 	// Per-entry ROFMultiplier for whoever is currently manning the weapon.
 	double perEntry = 1.0;
 
-	if (const auto pBuilding = abstract_cast<BuildingClass*>(pThis))
-	{
-		const int index = pBuilding->FiringOccupantIndex;
-
-		if (index >= 0 && index < pBuilding->Occupants.Count)
-		{
-			if (const auto pOccupant = pBuilding->Occupants[index])
-			{
-				if (const auto pEntry = pExt->PickGarrisonEntry(pOccupant->Type))
-					perEntry = pEntry->ROFMultiplier.Get();
-			}
-		}
-	}
+	if (const auto pEntry = ActiveGarrisonEntry(pThis))
+		perEntry = pEntry->ROFMultiplier.Get();
 
 	int occupants = OccupantsOf(pThis);
 
@@ -234,6 +249,83 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 
 	R->EBP(scaled);
 	R->Stack(0x14, scaled);
+
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 4. Per-entry FirepowerMultiplier.
+//
+// TechnoClass::FireAt @0x6FE460 — the convergence point AFTER vanilla's three
+// damage multipliers (Occupy @0x6FE3F1, Bunker @0x6FE421 and OpenTopped
+// @0x6FE43B, which Phobos hooks) and BEFORE the next block. Stolen bytes are
+// exactly 8A 83 4A 01 00 00 (mov al,[ebx+0x14A]). Unhooked by any framework.
+//
+// ESI = the firing techno. The damage is an int held in EDI and mirrored at
+// [ESP+0x2C] (vanilla writes `mov [esp+0x2C],edi` after each multiplier), so we
+// update both.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x6FE460, TechnoClass_FireAt_PayloadGarrisonFirepower, 0x6)
+{
+	GET(TechnoClass* const, pThis, ESI);
+	GET(int const, damage, EDI);
+
+	const auto pEntry = ActiveGarrisonEntry(pThis);
+
+	if (!pEntry)
+		return 0;
+
+	const double multiplier = pEntry->FirepowerMultiplier.Get();
+
+	if (multiplier == 1.0)
+		return 0;
+
+	int scaled = static_cast<int>(damage * multiplier);
+
+	// Never round a real hit down to nothing.
+	if (scaled < 1 && damage > 0)
+		scaled = 1;
+
+	R->EDI(scaled);
+	R->Stack(0x2C, scaled);
+
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// 5. Per-entry RangeBonus.
+//
+// TechnoClass::InRange @0x6F72EF — the convergence point AFTER vanilla's two
+// range bonuses (the occupy bonus @0x6F72C6 using RulesClass+0xF54, and the
+// open-topped bonus @0x6F72E1 using +0xF5C, which Phobos hooks at 0x6F72D2).
+// Stolen bytes are exactly 8A 88 97 02 00 00 (mov cl,[eax+0x297]).
+//
+// Deliberately NOT 0x6F72E3: Kratos hooks that address (TechnoClass_In_Range).
+// By 0x6F72EF vanilla has moved the range into EBX (`mov ebx,edi` @0x6F72E9),
+// so we adjust EBX. Range is in LEPTONS, hence the <<8 — matching vanilla's own
+// `shl $0x8` on both bonuses above.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x6F72EF, TechnoClass_InRange_PayloadGarrisonRange, 0x6)
+{
+	GET(TechnoClass* const, pThis, ESI);
+	GET(int const, range, EBX);
+
+	const auto pEntry = ActiveGarrisonEntry(pThis);
+
+	if (!pEntry)
+		return 0;
+
+	const int bonusCells = pEntry->RangeBonus.Get();
+
+	if (!bonusCells)
+		return 0;
+
+	int scaled = range + (bonusCells << 8);
+
+	if (scaled < 0)
+		scaled = 0;
+
+	R->EBX(scaled);
 
 	return 0;
 }

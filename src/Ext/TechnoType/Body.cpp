@@ -158,6 +158,12 @@ void TechnoTypeExt::ExtData::ReadGarrisonWeapons(INI_EX& exINI, const char* pSec
 		_snprintf_s(key, _TRUNCATE, "%s.ROFMultiplier", pBase);
 		entry.ROFMultiplier.Read(exINI, pSection, key);
 
+		_snprintf_s(key, _TRUNCATE, "%s.FirepowerMultiplier", pBase);
+		entry.FirepowerMultiplier.Read(exINI, pSection, key);
+
+		_snprintf_s(key, _TRUNCATE, "%s.RangeBonus", pBase);
+		entry.RangeBonus.Read(exINI, pSection, key);
+
 		this->GarrisonWeapons.emplace_back(std::move(entry));
 	};
 
