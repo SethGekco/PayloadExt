@@ -40,6 +40,8 @@
 
 #include <set>
 
+#include <Unsorted.h>
+
 #include <Ext/TechnoType/Body.h>
 
 namespace
@@ -129,6 +131,53 @@ DEFINE_HOOK(0x4580BD, BuildingClass_UnloadOccupants_PayloadOpenTopped, 0x6)
 			pOccupant->Transporter = nullptr;
 		}
 	}
+
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
+// TEMPORARY DIAGNOSTIC — is the occupant actually alive and hunting?
+//
+// TechnoClass::Update @0x6F9E50, the canonical benign shared entry point (all
+// four frameworks hook it and return 0; ECX = TechnoClass*). We only look at
+// technos that WE registered as open-topped inside a BUILDING, and only log one
+// line per occupant per ~3 seconds.
+//
+// This separates the two remaining failure modes:
+//   * no line at all      -> the occupant is not ticking (not in the logic layer)
+//   * lines with tgt=0    -> it ticks but never acquires a target
+//   * lines with tgt!=0   -> it has a target, so the problem is downstream in
+//                            firing, not targeting
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
+{
+	GET(TechnoClass* const, pThis, ECX);
+
+	if (!pThis || !pThis->InOpenToppedTransport)
+		return 0;
+
+	const auto pTransport = pThis->Transporter;
+
+	if (!pTransport || pTransport->WhatAmI() != AbstractType::Building)
+		return 0;
+
+	static int lastFrame = -1000;
+	const int frame = Unsorted::CurrentFrame;
+
+	if (frame - lastFrame < 90)
+		return 0;
+
+	lastFrame = frame;
+
+	Debug::Log("[PayloadExt-diag] occupant %s in %s: tgt=%p inLimbo=%d "
+		"playfield=%d loc=(%d,%d) bld=(%d,%d)\n",
+		pThis->GetTechnoType()->ID,
+		pTransport->GetTechnoType()->ID,
+		(void*)pThis->Target,
+		(int)pThis->InLimbo,
+		(int)pThis->IsInPlayfield,
+		pThis->Location.X, pThis->Location.Y,
+		pTransport->Location.X, pTransport->Location.Y);
 
 	return 0;
 }
