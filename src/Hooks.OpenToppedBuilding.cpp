@@ -89,17 +89,33 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 
 		pBuilding->EnteredOpenTopped(pInfantry);
 
+		// The 2026-09-04 diagnostic showed the occupant ticking correctly
+		// (InOpenToppedTransport=1, Transporter set, location matching the
+		// building) but with tgt=00000000 forever -- it never acquires a target.
+		// TechnoClass::Update does NOT skip limboed objects (the only InLimbo
+		// test in it, at 0x6FA6FC, guards one small call), so the block is in the
+		// MISSION layer: garrisoning leaves the occupant in a mission that never
+		// scans. A Battle Fortress passenger keeps an ordinary one.
+		//
+		// Guard is the right mission for something that cannot move but should
+		// shoot what comes into range. Logged below so the value before the
+		// change is visible either way.
+		const auto missionBefore = pInfantry->CurrentMission;
+		pInfantry->QueueMission(Mission::Guard, true);
+
 		// TEMPORARY DIAGNOSTIC: distinguishes "the occupant never got registered"
 		// from "it registered but will not shoot". Logged once per building.
 		static std::set<BuildingClass*> reported;
 		if (reported.insert(pBuilding).second)
 		{
 			Debug::Log("[PayloadExt-diag] OpenTopped building %s: registered %s "
-				"(InOpenToppedTransport=%d Transporter=%p occupants=%d)\n",
+				"(InOpenToppedTransport=%d Transporter=%p occupants=%d "
+				"mission %d -> %d)\n",
 				pBuilding->Type->ID, pInfantry->Type->ID,
 				(int)pInfantry->InOpenToppedTransport,
 				(void*)pInfantry->Transporter,
-				pBuilding->Occupants.Count);
+				pBuilding->Occupants.Count,
+				(int)missionBefore, (int)pInfantry->CurrentMission);
 		}
 	}
 
@@ -169,11 +185,12 @@ DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
 
 	lastFrame = frame;
 
-	Debug::Log("[PayloadExt-diag] occupant %s in %s: tgt=%p inLimbo=%d "
+	Debug::Log("[PayloadExt-diag] occupant %s in %s: tgt=%p mission=%d inLimbo=%d "
 		"playfield=%d loc=(%d,%d) bld=(%d,%d)\n",
 		pThis->GetTechnoType()->ID,
 		pTransport->GetTechnoType()->ID,
 		(void*)pThis->Target,
+		(int)pThis->CurrentMission,
 		(int)pThis->InLimbo,
 		(int)pThis->IsInPlayfield,
 		pThis->Location.X, pThis->Location.Y,
