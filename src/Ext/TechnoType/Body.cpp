@@ -1,8 +1,11 @@
 #include "Body.h"
 
+#include <cstring>
 #include <utility>
 
 #include <TechnoClass.h>
+#include <BuildingClass.h>
+#include <InfantryClass.h>
 #include <InfantryTypeClass.h>
 #include <WeaponTypeClass.h>
 #include <Utilities/Macro.h>
@@ -10,6 +13,10 @@
 #include <Ext/Rules/Body.h>
 
 TechnoTypeExt::ExtContainer TechnoTypeExt::ExtMap;
+
+// "" = vanilla garrison, ".RA2" = RA2 mode, ".OpenTopped" = open-topped.
+const char* const TechnoTypeExt::OccupyClassKeys[TechnoTypeExt::OccupyClassCount] =
+	{ "", ".RA2", ".OpenTopped" };
 
 // TechnoTypeClass::GetWeaponTurretIndex(int weapon) — vanilla __thiscall at
 // 0x7178B0. Verified by disassembly of a clean gamemd.exe:
@@ -75,10 +82,120 @@ int TechnoTypeExt::ExtData::ResolveTurretIndex(TechnoClass* pThis, int weaponInd
 	return -1;
 }
 
-bool TechnoTypeExt::ExtData::AllowsRA2Occupy() const
+bool TechnoTypeExt::ExtData::HasOccupancyPolicy() const
 {
-	return this->Occupier_RA2Mode.Get(
-		RulesExt::Global()->RA2Garrison_OccupierDefault.Get());
+	for (auto const& gate : this->OccupyGates)
+	{
+		if (gate.Allow.isset() || gate.ForceAll
+			|| !gate.Force.empty() || !gate.Deny.empty())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Occupier<suffix>=            on InfantryTypes
+// Occupier<suffix>.Allow=      on BuildingTypes  (default: CanBeOccupied=)
+// Occupier<suffix>.Force=      list, or "all"
+// Occupier<suffix>.Deny=       list
+void TechnoTypeExt::ExtData::ReadOccupancy(INI_EX& exINI, const char* pSection)
+{
+	char key[0x40];
+
+	for (int i = 0; i < OccupyClassCount; ++i)
+	{
+		const char* const suffix = OccupyClassKeys[i];
+
+		// Infantry side. Index 0 is the engine's own Occupier= field, so there is
+		// no PayloadExt key for it.
+		if (i > 0)
+		{
+			_snprintf_s(key, _TRUNCATE, "Occupier%s", suffix);
+			this->Occupier_Class[i].Read(exINI, pSection, key);
+		}
+
+		auto& gate = this->OccupyGates[i];
+
+		_snprintf_s(key, _TRUNCATE, "Occupier%s.Allow", suffix);
+		gate.Allow.Read(exINI, pSection, key);
+
+		// Force accepts either a type list or the literal "all". Probe the raw
+		// string first so the type parser never sees (and warns about) "all".
+		_snprintf_s(key, _TRUNCATE, "Occupier%s.Force", suffix);
+
+		if (exINI.ReadString(pSection, key) > 0)
+		{
+			const char* const raw = exINI.value();
+
+			if (!_strcmpi(raw, "all") || !_strcmpi(raw, "any"))
+				gate.ForceAll = true;
+			else
+				gate.Force.Read(exINI, pSection, key);
+		}
+
+		_snprintf_s(key, _TRUNCATE, "Occupier%s.Deny", suffix);
+		gate.Deny.Read(exINI, pSection, key);
+	}
+}
+
+namespace
+{
+	bool ListContains(const ValueableVector<InfantryTypeClass*>& list,
+		InfantryTypeClass* pType)
+	{
+		for (auto const pEntry : list)
+		{
+			if (pEntry == pType)
+				return true;
+		}
+		return false;
+	}
+}
+
+bool TechnoTypeExt::AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInfantry)
+{
+	if (!pBuilding || !pInfantry || !pBuilding->Type || !pInfantry->Type)
+		return false;
+
+	const auto pBldExt = ExtMap.Find(pBuilding->Type);
+	const auto pInfExt = ExtMap.Find(pInfantry->Type);
+
+	if (!pBldExt)
+		return false;
+
+	const bool vanillaOccupier = pInfantry->Type->Occupier;
+	const bool canBeOccupied = pBuilding->Type->CanBeOccupied;
+
+	for (int i = 0; i < OccupyClassCount; ++i)
+	{
+		auto const& gate = pBldExt->OccupyGates[i];
+
+		// Does the building admit this CLASS at all? Unset -> CanBeOccupied=.
+		if (!gate.Allow.Get(canBeOccupied))
+			continue;
+
+		// Deny wins over everything else.
+		if (ListContains(gate.Deny, pInfantry->Type))
+			continue;
+
+		// Does the infantry qualify as this class on its own? Class 0 is the
+		// engine's Occupier=; the others fall back to the [General] default and
+		// then to Occupier= itself.
+		bool qualifies = vanillaOccupier;
+
+		if (i > 0 && pInfExt)
+		{
+			qualifies = pInfExt->Occupier_Class[i].Get(
+				RulesExt::Global()->OccupierClassDefault[i].Get(vanillaOccupier));
+		}
+
+		// ...or the building forces it in regardless.
+		if (qualifies || gate.ForceAll || ListContains(gate.Force, pInfantry->Type))
+			return true;
+	}
+
+	return false;
 }
 
 WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOccupantType)
@@ -194,8 +311,8 @@ void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 	this->Garrison_ROFPerOccupant.Read(exINI, pSection, "GarrisonWeapon.ROFPerOccupant");
 	this->Garrison_ROFMaxOccupants.Read(exINI, pSection, "GarrisonWeapon.ROFMaxOccupants");
 	this->Garrison_MinOccupants.Read(exINI, pSection, "CanOccupyFire.RA2Mode.MinOccupants");
-	this->Occupier_RA2Mode.Read(exINI, pSection, "Occupier.RA2Mode");
 
+	this->ReadOccupancy(exINI, pSection);
 	this->ReadGarrisonWeapons(exINI, pSection);
 }
 
@@ -212,7 +329,6 @@ void TechnoTypeExt::ExtData::Serialize(T& Stm)
 		.Process(this->Garrison_ROFPerOccupant)
 		.Process(this->Garrison_ROFMaxOccupants)
 		.Process(this->Garrison_MinOccupants)
-		.Process(this->Occupier_RA2Mode)
 		;
 }
 

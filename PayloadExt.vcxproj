@@ -34,6 +34,8 @@
     <ClCompile Include="src\Hooks.Turrets.cpp" />
     <!-- RA2-style garrison: building weapon crewed by occupants -->
     <ClCompile Include="src\Hooks.CrewedWeapon.cpp" />
+    <!-- Occupancy permission matrix (who may garrison) -->
+    <ClCompile Include="src\Hooks.Occupancy.cpp" />
     <!-- OpenTopped buildings: occupants fire their own weapons out -->
     <ClCompile Include="src\Hooks.OpenToppedBuilding.cpp" />
   </ItemGroup>

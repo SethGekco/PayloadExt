@@ -7,6 +7,8 @@
 
 #include <TechnoTypeClass.h>
 
+class BuildingClass;
+class InfantryClass;
 class InfantryTypeClass;
 class WeaponTypeClass;
 
@@ -44,6 +46,30 @@ public:
 		Valueable<int> RangeBonus { 0 };
 	};
 
+	// The three occupant CLASSES a building can admit. They are independent
+	// filters, not modes: a building may admit any combination.
+	//   0 Vanilla    -- the stock garrison, gated by InfantryType Occupier=
+	//   1 RA2        -- the building's own garrison weapon (CanOccupyFire.RA2Mode)
+	//   2 OpenTopped -- occupants fire their own weapons out (OpenTopped=)
+	static constexpr int OccupyClassCount = 3;
+
+	// INI suffix per class: Occupier / Occupier.RA2 / Occupier.OpenTopped
+	static const char* const OccupyClassKeys[OccupyClassCount];
+
+	// Per-building gate for one occupant class.
+	struct OccupyGate
+	{
+		// May this class enter at all? Unset -> defaults to CanBeOccupied=.
+		Nullable<bool> Allow {};
+		// Types admitted even when their own Occupier[.Class]= says no.
+		ValueableVector<InfantryTypeClass*> Force {};
+		// `Force=all` -- admit every type regardless of its own flag.
+		bool ForceAll = false;
+		// Types refused even when everything else would admit them. Combined
+		// with Force=all this is the plain blacklist.
+		ValueableVector<InfantryTypeClass*> Deny {};
+	};
+
 	class ExtData final : public Extension<TechnoTypeClass>
 	{
 	public:
@@ -75,13 +101,21 @@ public:
 
 		std::vector<GarrisonWeaponEntry> GarrisonWeapons;
 
-		// InfantryType side: may this infantry enter an RA2-mode garrison?
-		// Vanilla `Occupier=` is only set on E1/E2/INIT, so RA2 mode uses its own
-		// flag, defaulting to [General]->Occupier.RA2Mode.Default (yes).
-		Nullable<bool> Occupier_RA2Mode;
+		// --- Occupancy permissions (docs/GARRISON.md) -----------------------
+		// InfantryType side. Index 0 (vanilla) is the engine's own Occupier=
+		// field and is never stored here; 1 = RA2, 2 = OpenTopped. Unset falls
+		// back to [General] -> Occupier.<Class>.Default, and failing that to the
+		// type's own vanilla Occupier=.
+		Nullable<bool> Occupier_Class[OccupyClassCount] {};
+
+		// BuildingType side, one gate per class.
+		OccupyGate OccupyGates[OccupyClassCount] {};
 
 		bool UsesRA2Garrison() const { return this->CanOccupyFire_RA2Mode.Get(); }
-		bool AllowsRA2Occupy() const;
+
+		// True when this BUILDING type overrides occupancy policy in any way, so
+		// the hook can leave everything else to vanilla/Antares.
+		bool HasOccupancyPolicy() const;
 
 		// Picks the garrison weapon for the given occupant type, or nullptr to
 		// fall back to the building's own Primary=/Secondary= (which is exactly
@@ -99,7 +133,6 @@ public:
 			, Garrison_ROFMaxOccupants { 0 }
 			, Garrison_MinOccupants { 1 }
 			, GarrisonWeapons {}
-			, Occupier_RA2Mode {}
 		{ }
 
 		virtual ~ExtData() = default;
@@ -114,6 +147,7 @@ public:
 		int ResolveTurretIndex(TechnoClass* pThis, int weaponIndex) const;
 
 	private:
+		void ReadOccupancy(INI_EX& exINI, const char* pSection);
 		void ReadGarrisonWeapons(INI_EX& exINI, const char* pSection);
 
 		template <typename T>
@@ -133,4 +167,9 @@ public:
 
 	// Convenience: ext for a techno's type, or nullptr.
 	static ExtData* Fetch(TechnoClass* pThis);
+
+	// The whole admission rule, in one place. An infantry may enter as class C
+	// when:  Allow[C] && (its own Occupier[C] || Force[C]) && !Deny[C]
+	// and admission is true when that holds for ANY class.
+	static bool AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInfantry);
 };

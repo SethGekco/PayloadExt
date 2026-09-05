@@ -85,51 +85,6 @@ namespace
 }
 
 // ---------------------------------------------------------------------------
-// 0. Let ordinary infantry crew an RA2-mode garrison.
-//
-// BuildingClass::CanBeOccupiedBy @0x457D48 — `mov eax,[edi+0x6C0]` (the
-// infantry's Type), exactly 6 bytes (8B 87 C0 06 00 00). ESI = building,
-// EDI = infantry. Vanilla then reads InfantryTypeClass+0xEB4 (`Occupier=`) and,
-// if clear, diverts to the ASSAULT branch at 0x457DAD — so a non-Occupier type
-// can never garrison. Vanilla only sets Occupier= on E1/E2/INIT, which would
-// make RA2 mode unusable for every other infantry type.
-//
-// Returning 0x457D58 skips only the Occupier test and rejoins the normal
-// occupier path (EAX is immediately overwritten there, so not setting it is
-// safe). Antares' own hook at 0x457D58 still runs.
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x457D48, BuildingClass_CanBeOccupiedBy_PayloadRA2Occupier, 0x6)
-{
-	enum { SkipOccupierCheck = 0x457D58 };
-
-	GET(TechnoClass* const, pThis, ESI);
-	GET(InfantryClass* const, pInfantry, EDI);
-
-	if (!pInfantry)
-		return 0;
-
-	// Applies to BOTH PayloadExt garrison modes: RA2 mode (building's weapon)
-	// and OpenTopped buildings (occupants fire their own). Plain YR garrisons
-	// keep vanilla's Occupier= rule untouched.
-	const auto pType = pThis ? pThis->GetTechnoType() : nullptr;
-	const auto pBldExt = TechnoTypeExt::Fetch(pThis);
-	const bool payloadGarrison =
-		(pBldExt && pBldExt->UsesRA2Garrison()) || (pType && pType->OpenTopped);
-
-	if (!payloadGarrison)
-		return 0;
-
-	const auto pInfExt = TechnoTypeExt::ExtMap.Find(pInfantry->Type);
-
-	// Defaults to [General]->Occupier.RA2Mode.Default (yes), so RA2 mode works
-	// out of the box; set Occupier.RA2Mode=no to keep a type out.
-	if (pInfExt && pInfExt->AllowsRA2Occupy())
-		return SkipOccupierCheck;
-
-	return 0;
-}
-
-// ---------------------------------------------------------------------------
 // 1. Re-open the fire gate.
 //
 // BuildingClass::CanFire @0x447F25 — the `mov cl,[eax+0x157C]` that reads

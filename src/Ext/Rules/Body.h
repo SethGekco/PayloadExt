@@ -12,11 +12,12 @@ class RulesExt
 public:
 	struct ExtData
 	{
-		// Default for InfantryType `Occupier.RA2Mode=`. Vanilla `Occupier=` is
-		// only set on E1/E2/INIT, which would otherwise make RA2-mode garrisons
-		// unusable for every other infantry type. Defaults to YES so RA2 mode
-		// "just works"; set to no in [General] to opt in per type instead.
-		Valueable<bool> RA2Garrison_OccupierDefault { true };
+		// Global default for the per-class InfantryType flags, i.e. what
+		// Occupier.RA2= / Occupier.OpenTopped= mean when a type does not set
+		// them. Unset -> fall back to that type's own vanilla Occupier=.
+		// Index 0 (vanilla) is unused; it is the engine's own field.
+		//   [General] Occupier.RA2.Default= / Occupier.OpenTopped.Default=
+		Nullable<bool> OccupierClassDefault[3] {};
 	};
 
 	static ExtData Data;
