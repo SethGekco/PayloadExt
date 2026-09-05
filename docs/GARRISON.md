@@ -375,3 +375,86 @@ for them; we submit each occupant on entry and withdraw it on exit.
   at once. That is the point, but it is a real balance change.
 - `Transporter` pointing at a *building* is a configuration the engine never
   produces on its own. If something asserts on it, this is the first suspect.
+
+---
+
+## 4. Occupancy — who may garrison (`src/Hooks.Occupancy.cpp`)
+
+Vanilla has exactly **one** gate: `InfantryTypeClass::Occupier=`, shipped set on
+only **E1, E2 and INIT**. That is a global whitelist expressed on the *infantry*,
+so a building cannot say anything about who it accepts. PayloadExt moves the
+decision to the **building** and splits it by occupant **class**:
+
+| class | meaning | infantry flag |
+|---|---|---|
+| Vanilla | the stock garrison | `Occupier=` |
+| RA2 | building's own garrison gun | `Occupier.RA2=` |
+| OpenTopped | occupants fire their own weapons out | `Occupier.OpenTopped=` |
+
+```ini
+[InfantryType]
+Occupier=yes                 ; vanilla, unchanged
+Occupier.RA2=                ; default: [General] -> else this type's Occupier=
+Occupier.OpenTopped=         ; default: [General] -> else this type's Occupier=
+
+[BuildingType]
+Occupier.Allow=              ; admit vanilla occupiers?   default: CanBeOccupied=
+Occupier.RA2.Allow=          ;                            default: CanBeOccupied=
+Occupier.OpenTopped.Allow=   ;                            default: CanBeOccupied=
+
+Occupier.Force=              ; type list, or "all" -- admit regardless of their
+Occupier.RA2.Force=          ; own flag.            default: none
+Occupier.OpenTopped.Force=
+
+Occupier.Deny=               ; type list -- refuse even if everything else
+Occupier.RA2.Deny=           ; would admit.         default: none
+Occupier.OpenTopped.Deny=
+
+[General]
+Occupier.RA2.Default=        ; global default for the infantry sub-flags
+Occupier.OpenTopped.Default=
+```
+
+**The rule.** An infantry may enter as class *C* when:
+
+> `Allow[C]` **and** ( its own `Occupier[C]` **or** it is in `Force[C]` ) **and**
+> it is **not** in `Deny[C]`
+
+and admission is true when that holds for **any** class. So:
+
+- **Whitelist** (vanilla feel): leave `Force` empty; only types flagged for that
+  class get in.
+- **Blacklist**: `Occupier.OpenTopped.Force=all` + `Occupier.OpenTopped.Deny=DOG,SPY`.
+- **Cross-filtering**: an open-topped building that refuses ordinary occupiers is
+  `Occupier.Allow=no` + `Occupier.OpenTopped.Allow=yes`.
+
+Everything defaults to current behaviour, so an untagged building is unchanged.
+
+### ⚠ Load order — this feature requires it
+
+Antares does not *add* a check at `0x457D58`; it **replaces the whole occupier
+block** and re-tests `Occupier=` itself:
+
+```cpp
+if (pInf->Type->Occupier) { ...its own AllowedOccupiers list... }
+return can_occupy ? 0x457DD5 : 0x457DA3;      // never returns 0
+```
+
+A non-zero return ends the Syringe chain, so **the DLL listed first wins that
+address**. `PayloadExt.dll` is therefore listed **before** `Antares.dll` in
+`wine-game.sh` and `ClientDefinitions.ini`.
+
+The takeover is kept minimal: unless the building declares a policy we return 0
+and Antares behaves exactly as before — including its own `CanBeOccupiedBy=`
+whitelist, raidable-bunker rules and ownership logic. We only bypass Antares for
+a **forced non-`Occupier`** type, and in that path we replicate the two guards
+that matter (capacity, mind-control).
+
+This supersedes `Occupier.RA2Mode`, which was a silent no-op under Antares for
+exactly this reason.
+
+### Interaction with Antares' own whitelist
+Antares already provides `CanBeOccupiedBy=E1,E2` on a BuildingType (empty = allow
+all). It still applies on every building where we return 0. If you declare a
+PayloadExt policy on a building, prefer expressing the whole rule in PayloadExt
+terms rather than mixing the two.
