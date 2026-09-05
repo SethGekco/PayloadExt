@@ -36,6 +36,9 @@
 #include <TechnoClass.h>
 
 #include <Utilities/Macro.h>
+#include <Utilities/Debug.h>
+
+#include <set>
 
 #include <Ext/TechnoType/Body.h>
 
@@ -64,10 +67,38 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 
 	if (pInfantry && BuildingIsOpenTopped(pBuilding))
 	{
-		// Required by the open-topped firing/targeting paths, which read the
-		// passenger's Transporter to know where it is shooting from.
+		// EnteredOpenTopped alone is NOT enough. Every Phobos call site pairs it
+		// with the same companion state, and a limboed garrison occupant needs
+		// all of it to behave like a real open-topped passenger:
+		//
+		//   Ext/Team/Hooks.cpp:43-47        IsInPlayfield = true; Transporter = ...
+		//   Ext/Foot/Body.cpp:662-664       SetLocation(transport->Location)
+		//   Ext/Techno/Hooks.Transport:303  SetSpeedPercentage(0.0)
+		//                                   "to stop the passengers and let
+		//                                    OpenTopped work normally"
+		//
+		// Without SetLocation the occupant keeps the coordinates it had while
+		// walking outside, so its range checks and target scan run from the wrong
+		// place; without IsInPlayfield it is not treated as live at all.
 		pInfantry->Transporter = pBuilding;
+		pInfantry->IsInPlayfield = true;
+		pInfantry->SetLocation(pBuilding->Location);
+		pInfantry->SetSpeedPercentage(0.0);
+
 		pBuilding->EnteredOpenTopped(pInfantry);
+
+		// TEMPORARY DIAGNOSTIC: distinguishes "the occupant never got registered"
+		// from "it registered but will not shoot". Logged once per building.
+		static std::set<BuildingClass*> reported;
+		if (reported.insert(pBuilding).second)
+		{
+			Debug::Log("[PayloadExt-diag] OpenTopped building %s: registered %s "
+				"(InOpenToppedTransport=%d Transporter=%p occupants=%d)\n",
+				pBuilding->Type->ID, pInfantry->Type->ID,
+				(int)pInfantry->InOpenToppedTransport,
+				(void*)pInfantry->Transporter,
+				pBuilding->Occupants.Count);
+		}
 	}
 
 	return 0;
