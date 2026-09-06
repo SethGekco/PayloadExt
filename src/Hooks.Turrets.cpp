@@ -15,80 +15,65 @@
 #include <Utilities/Macro.h>
 #include <Utilities/Debug.h>
 
-#include <cstdio>
 #include <set>
-#include <utility>
 
 #include <Ext/TechnoType/Body.h>
 
 namespace
 {
-	// ---- TEMPORARY DIAGNOSTIC: "turret invisible until the unit first fires" --
+	// Repair an out-of-range CurrentTurretNumber, and say so once per type.
 	//
-	// Established so far: for [SREF] all four ChargerTurrets slots ARE loaded
-	// (read out of a crash dump: VXL+HVA non-null for 0..3), while the vanilla
-	// TurretVoxel slot is NULL. So the art is not missing.
+	// WHY THIS IS NEEDED — "the turret is invisible until the unit first fires",
+	// diagnosed 2026-09-05 and confirmed from a live log:
 	//
-	// Phobos picks the voxel with:
-	//     if (TurretCount == 0 || IsGattling || idx < 0) return &TurretVoxel;
-	//     if (idx < 18) return &ChargerTurrets[idx];
-	//   ... if (!(tur && tur->VXL && tur->HVA)) return SkipDrawing;
+	//   SREF: TurretCount=4 TurretVoxel=NULL slots[0=ok 1=ok 2=ok 3=ok]
+	//   SREF: no selector result (no target); CurrentTurretNumber=-1
+	//   SREF: applying turret 3 (was -1)
 	//
-	// so a NEGATIVE CurrentTurretNumber lands on the null TurretVoxel and the
-	// turret is silently not drawn -- which matches "invisible" exactly. This
-	// logs what the index actually is, and which slots are populated, so we can
-	// tell "index went negative" from "index is fine, art is not drawn".
+	// The art is fine — all four ChargerTurrets slots are loaded. The index is
+	// what goes bad. Antares' TechnoClass_SwitchGunner (0x70DC70) does
 	//
-	// ChargerTurrets is not declared in YRpp: it is VoxelStruct[18] at type+0xC8,
-	// each entry {VXL*, HVA*} (derived from the vanilla loader at 0x5F7A90,
-	// which stores to [type + esi*8 + 0xC8] / [+0xCC]).
-	constexpr int ChargerTurretsOffset = 0xC8;
-
-	void DiagTurretSlots(TechnoTypeClass* pType)
+	//     if(!pType->IsChargeTurret) {
+	//         if(index < 0 || index >= pType->WeaponCount) index = 0;
+	//         pThis->CurrentTurretNumber = *pExt->GetWeaponTurretIndex(index);
+	//     }
+	//
+	// and GetWeaponTurretIndex(0) is &pType->TurretWeapon[0], which defaults to
+	// **-1** for a type that declares no per-weapon turret mapping
+	// (WeaponTurretIndex<N>= / <WeaponName>TurretIndex=). So Antares writes -1
+	// straight into CurrentTurretNumber without validating it.
+	//
+	// -1 then breaks BOTH draw paths, silently and without a crash:
+	//   * Phobos: `if (TurretCount == 0 || IsGattling || idx < 0) return
+	//     &TurretVoxel;` — and Antares has moved the turret art out of
+	//     TurretVoxel into ChargerTurrets, leaving it NULL, so the follow-up
+	//     `if (!(tur && tur->VXL && tur->HVA)) return SkipDrawing;` skips it.
+	//   * Antares: GetTurretVoxel(-1) is &ChargerTurrets[-1] — a read from
+	//     before the array.
+	//
+	// Note this only bites when IsChargeTurret=no, which is precisely the
+	// configuration that hands CurrentTurretNumber to us. With IsChargeTurret=yes
+	// Antares skips the branch and the engine's charge animation kept the index
+	// in range, which is why this never showed up before.
+	//
+	// The data-side fix is `WeaponTurretIndex1=0` on the type; we repair it in
+	// code as well so a tagged type can never render invisible because of an INI
+	// omission.
+	void RepairTurretIndex(TechnoClass* pThis, TechnoTypeClass* pType)
 	{
+		const int current = pThis->CurrentTurretNumber;
+		if (current >= 0 && current < pType->TurretCount)
+			return;
+
 		static std::set<TechnoTypeClass*> reported;
-		if (!reported.insert(pType).second)
-			return;
+		if (reported.insert(pType).second)
+			Debug::Log("[PayloadExt] %s: CurrentTurretNumber was %d, outside "
+				"0..%d — repaired to 0. Set WeaponTurretIndex1= on the type to "
+				"fix this in the rules.\n",
+				pType->ID, current, pType->TurretCount - 1);
 
-		auto const base = reinterpret_cast<DWORD*>(
-			reinterpret_cast<BYTE*>(pType) + ChargerTurretsOffset);
-
-		char slots[128];
-		int n = 0;
-		for (int i = 0; i < pType->TurretCount && i < 18; ++i)
-			n += _snprintf_s(slots + n, sizeof(slots) - n, _TRUNCATE,
-				"%s%d=%s", i ? " " : "", i,
-				(base[i * 2] && base[i * 2 + 1]) ? "ok" : "EMPTY");
-
-		auto const pMain = reinterpret_cast<DWORD*>(
-			reinterpret_cast<BYTE*>(pType) + 0xB8); // vanilla TurretVoxel
-		Debug::Log("[PayloadExt-diag] %s: TurretCount=%d TurretVoxel=%s slots[%s]\n",
-			pType->ID, pType->TurretCount,
-			(pMain[0] && pMain[1]) ? "ok" : "NULL", slots);
+		pThis->CurrentTurretNumber = 0;
 	}
-
-	// Report each distinct index this type is given, plus the "we left it alone"
-	// case -- that one carries the engine's own value, which is the number we
-	// actually need to see.
-	void DiagTurretIndex(TechnoClass* pThis, TechnoTypeClass* pType, int resolved)
-	{
-		static std::set<std::pair<TechnoTypeClass*, int>> reported;
-		int const current = pThis->CurrentTurretNumber;
-		int const key = (resolved >= 0) ? resolved : (-1000 - current);
-		if (!reported.emplace(pType, key).second)
-			return;
-
-		if (resolved >= 0)
-			Debug::Log("[PayloadExt-diag] %s: applying turret %d (was %d)\n",
-				pType->ID, resolved, current);
-		else
-			Debug::Log("[PayloadExt-diag] %s: no selector result (no target); "
-				"engine left CurrentTurretNumber=%d%s\n",
-				pType->ID, current,
-				current < 0 ? "   <<< NEGATIVE: Phobos draws the null TurretVoxel"
-							  " and skips the turret" : "");
-	}
-	// ---- end diagnostic ------------------------------------------------------
 
 	// Applies a resolved turret index, with every safety guard in one place.
 	void ApplyTurretIndex(TechnoClass* pThis, int weaponIndex)
@@ -109,16 +94,16 @@ namespace
 		if (!pTypeExt || !pTypeExt->HasTurretSelector())
 			return;
 
-		DiagTurretSlots(pType);
-
 		const int index = pTypeExt->ResolveTurretIndex(pThis, weaponIndex);
-
-		DiagTurretIndex(pThis, pType, index);
 
 		// Out-of-range indices would index past the ChargerTurrets array during
 		// drawing, so clamp to the declared turret count instead of trusting INI.
 		if (index >= 0 && index < pType->TurretCount)
 			pThis->CurrentTurretNumber = index;
+		else
+			// No selector result (typically: no target yet). Leave a VALID index
+			// alone, but never leave a bad one in place — see above.
+			RepairTurretIndex(pThis, pType);
 	}
 }
 
