@@ -153,3 +153,39 @@ Implementation shape for that phase (not yet built):
   address.
 - `0x73BA12` behaviour — read directly from Phobos `Ext/TechnoType/Hooks.MatrixOp.cpp`.
 - **Not yet compiled or run in game.** No in-game verification of the selectors.
+
+---
+
+## 5. TODO — remove `RepairTurretIndex` if the rules-side fix is sufficient
+
+**Rex's standing principle: the DLL should not meddle with things that already
+work.** `RepairTurretIndex()` in `src/Hooks.Turrets.cpp` currently rewrites an
+out-of-range `CurrentTurretNumber` to 0. That is a workaround for someone
+else's value, and it is exactly the kind of silent repair that principle warns
+about — it papers over a bad index instead of letting it be visible.
+
+Background (diagnosed 2026-09-05): with `IsChargeTurret=no`, Antares'
+`TechnoClass_SwitchGunner` (`0x70DC70`) assigns
+`CurrentTurretNumber = *GetWeaponTurretIndex(0)`, i.e. `TurretWeapon[0]`, which
+defaults to **-1** when the type sets no per-weapon turret mapping. A negative
+index makes Phobos fall back to the (Antares-emptied, NULL) `TurretVoxel` and
+skip the draw, and makes Antares read `&ChargerTurrets[-1]`. Net effect: the
+turret is invisible until the first shot.
+
+`[SREF]` now carries `WeaponTurretIndex1=0`, which fixes it in the rules with no
+code involved. Antares even validates this key at parse time
+(`"Weapon %d on [%s] has an invalid turret index of %d."`) — though that warning
+appears to be suppressed in our build, which is why it never surfaced.
+
+**To decide:**
+1. With `WeaponTurretIndex1=` set, does `RepairTurretIndex` ever fire? It logs
+   once per type when it does — if the log stays silent across a few games, the
+   repair is dead code and should come out.
+2. If it does still fire, find out who is writing the bad index and fix that,
+   rather than continuing to correct it after the fact.
+3. Either way, prefer surfacing the bad value (a one-line warning naming the
+   type and the missing key) over silently substituting 0.
+
+Related: the seam fix at `0x6FA5BE` (§2) is a *different* issue and should stay
+— that one stops the engine overwriting a value we legitimately own, rather than
+overriding a value we do not.
