@@ -67,10 +67,18 @@ namespace
 
 		static std::set<TechnoTypeClass*> reported;
 		if (reported.insert(pType).second)
+			// TurretWeapon[0] is what Antares' SwitchGunner copies into
+			// CurrentTurretNumber, and what WeaponTurretIndex1= sets. Reporting
+			// it separates "the rules key never landed" from "the key is fine
+			// and the bad index comes from somewhere else" — which is the open
+			// question in docs/TURRETS.md §5.
 			Debug::Log("[PayloadExt] %s: CurrentTurretNumber was %d, outside "
-				"0..%d — repaired to 0. Set WeaponTurretIndex1= on the type to "
-				"fix this in the rules.\n",
-				pType->ID, current, pType->TurretCount - 1);
+				"0..%d — repaired to 0. TurretWeapon[0]=%d (%s).\n",
+				pType->ID, current, pType->TurretCount - 1,
+				pType->TurretWeapon[0],
+				pType->TurretWeapon[0] >= 0
+					? "WeaponTurretIndex1= applied, so the -1 came from elsewhere"
+					: "unset — set WeaponTurretIndex1= on the type");
 
 		pThis->CurrentTurretNumber = 0;
 	}
