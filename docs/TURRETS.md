@@ -220,6 +220,42 @@ Open question, and what the next game answers: the repair now also logs
 - `TurretWeapon[0]=-1` → the key is not reaching `ReadWeapons`, and the real fix
   is in the rules/parse path, after which the repair can be deleted.
 
+
+### 5.2 RESOLVED — there is no rules-side fix; the repair stays (2026-09-06)
+
+`TurretWeapon[0]=-1` in game **after** `WeaponTurretIndex1=0` was added, so the
+key never landed. Cause:
+
+    DEFINE_HOOK(0x747BCF, UnitTypeClass_LoadFromINI_Turrets, 0x5)
+    {
+        if(pThis->Gunner) {                                   // <-- gated
+            TechnoTypeExt::ExtMap.Find(pThis)->LoadTurrets(pINI);
+        }
+
+`LoadTurrets()` is the **only** caller of the `WeaponTurretIndex%u` /
+`<Name>TurretWeapon` parse loops, and it runs only for `Gunner=yes` units (its
+`TurretNames` list — Normal, Repair, MachineGun, Flak, … — is the IFV set).
+`[SREF]` is not a gunner, so the key is never read and `TurretWeapon[]` keeps
+its -1 default.
+
+**But `SwitchGunner` (`0x70DC70`) consumes it regardless of `Gunner`:**
+
+    if(!pType->IsChargeTurret) {
+        pThis->CurrentTurretNumber = *pExt->GetWeaponTurretIndex(index);
+    }
+
+So Antares reads a field it only ever populates for gunner units, and applies it
+to every non-`IsChargeTurret` type. A non-gunner multi-turret unit therefore
+always receives -1. **That is an Antares gap, not a mod misconfiguration**, and
+it cannot be fixed from the rules — `WeaponTurretIndex1=` has been commented out
+in `rulesmd.ini` with this explanation recorded in place.
+
+**Conclusion: `RepairTurretIndex` stays.** Criteria (1) and (2) in §5 are both
+resolved — it does fire, and the writer is Antares' own path with no INI
+override available. The remaining option is upstream: report to the
+Antares/Phobos channel that `SwitchGunner` should skip the assignment (or clamp
+it) when the index is negative / when `LoadTurrets` never ran.
+
 Related: the seam fix at `0x6FA5BE` (§2) is a *different* issue and should stay
 — that one stops the engine overwriting a value we legitimately own, rather than
 overriding a value we do not.
