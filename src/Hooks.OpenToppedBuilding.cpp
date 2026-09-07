@@ -198,3 +198,45 @@ DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
 
 	return 0;
 }
+
+// ---------------------------------------------------------------------------
+// TEMPORARY DIAGNOSTIC — is the target SCAN even being attempted?
+//
+// FootClass::SelectAutoTarget @0x4D9920 is the thin wrapper that adjusts the
+// threat flags for cloak and then calls Greatest_Threat. If this never fires for
+// our occupant, nothing is asking it to look for a target (a mission problem);
+// if it fires every few frames and tgt stays null, the scan runs but rejects
+// everything (a targeting/threat problem). Those need completely different
+// fixes, so it is worth one log line to tell them apart.
+//
+// Antares hooks this SAME address with 0x9 stolen bytes; we use 0x9 too and
+// always return 0, so both chain. (0x4D9923 would look like a tidier 6-byte
+// site but sits INSIDE Antares' stolen range -- a real overlap, not a share.)
+// ECX = FootClass* on entry, before `mov esi,ecx`.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x4D9920, FootClass_SelectAutoTarget_PayloadOpenToppedDiag, 0x9)
+{
+	GET(TechnoClass* const, pThis, ECX);
+
+	if (!pThis || !pThis->InOpenToppedTransport)
+		return 0;
+
+	const auto pTransport = pThis->Transporter;
+
+	if (!pTransport || pTransport->WhatAmI() != AbstractType::Building)
+		return 0;
+
+	static int scans = 0;
+
+	// A handful of lines is enough to prove it is being called at all.
+	if (++scans <= 5)
+	{
+		Debug::Log("[PayloadExt-diag] SelectAutoTarget #%d for %s in %s "
+			"(mission=%d tgt=%p)\n",
+			scans, pThis->GetTechnoType()->ID,
+			pTransport->GetTechnoType()->ID,
+			(int)pThis->CurrentMission, (void*)pThis->Target);
+	}
+
+	return 0;
+}
