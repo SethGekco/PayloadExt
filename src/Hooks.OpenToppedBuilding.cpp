@@ -32,6 +32,7 @@
 // (BuildingClass::CanFire @0x447F2D) and only the occupants shoot.
 
 #include <BuildingClass.h>
+#include <FootClass.h>
 #include <InfantryClass.h>
 #include <TechnoClass.h>
 
@@ -82,10 +83,31 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 		// Without SetLocation the occupant keeps the coordinates it had while
 		// walking outside, so its range checks and target scan run from the wrong
 		// place; without IsInPlayfield it is not treated as live at all.
-		pInfantry->Transporter = pBuilding;
 		pInfantry->IsInPlayfield = true;
 		pInfantry->SetLocation(pBuilding->Location);
 		pInfantry->SetSpeedPercentage(0.0);
+
+		// 2026-09-07: the previous build proved the occupant is ticking, in
+		// Guard (mission 5 BEFORE we touched it -- so the mission was never the
+		// problem), correctly located, and that FootClass::SelectAutoTarget IS
+		// being called for it. The scan runs and simply finds nothing.
+		//
+		// The one structural difference left between us and a Battle Fortress
+		// passenger is membership of the transport's PASSENGERS list
+		// (TechnoClass+0x114; NumPassengers +0x114, FirstPassenger +0x118,
+		// Transporter +0x11C). A garrison occupant lives only in Occupants
+		// (+0x684), so the transport looks empty to anything that walks the
+		// passenger chain -- and the open-topped branch of TechnoClass::
+		// EvaluateObject (0x6F7EC2) does dereference a field off the transport
+		// and abandons the branch when it is null.
+		//
+		// Phobos's working transport path is ordered exactly like this and
+		// comments "Don't swap order casually, very very important":
+		//     AddPassenger -> Transporter -> EnteredOpenTopped
+		// so we now match it. The occupant is deliberately in BOTH lists;
+		// the exit hook removes it from Passengers again to keep them symmetric.
+		pBuilding->AddPassenger(pInfantry);
+		pInfantry->Transporter = pBuilding;
 
 		pBuilding->EnteredOpenTopped(pInfantry);
 
@@ -110,11 +132,12 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 		{
 			Debug::Log("[PayloadExt-diag] OpenTopped building %s: registered %s "
 				"(InOpenToppedTransport=%d Transporter=%p occupants=%d "
-				"mission %d -> %d)\n",
+				"passengers=%d mission %d -> %d)\n",
 				pBuilding->Type->ID, pInfantry->Type->ID,
 				(int)pInfantry->InOpenToppedTransport,
 				(void*)pInfantry->Transporter,
 				pBuilding->Occupants.Count,
+				pBuilding->Passengers.NumPassengers,
 				(int)missionBefore, (int)pInfantry->CurrentMission);
 		}
 	}
@@ -144,6 +167,13 @@ DEFINE_HOOK(0x4580BD, BuildingClass_UnloadOccupants_PayloadOpenTopped, 0x6)
 		if (const auto pTransport = pOccupant->Transporter)
 		{
 			pTransport->ExitedOpenTopped(pOccupant);
+
+			// We put the occupant in Passengers on entry as well as Occupants;
+			// take it back out so the garrison unload path is the only thing
+			// still holding it.
+			if (const auto pFoot = abstract_cast<FootClass*>(pOccupant))
+				pTransport->Passengers.RemovePassenger(pFoot);
+
 			pOccupant->Transporter = nullptr;
 		}
 	}
