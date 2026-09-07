@@ -186,6 +186,40 @@ appears to be suppressed in our build, which is why it never surfaced.
 3. Either way, prefer surfacing the bad value (a one-line warning naming the
    type and the missing key) over silently substituting 0.
 
+
+### 5.1 Status after the rules fix (2026-09-05)
+
+`[SREF]` now sets `WeaponTurretIndex1=0` and **the turret renders correctly
+before firing** — the user-visible bug is fixed.
+
+But the repair **still fired once**:
+
+    [PayloadExt] SREF: CurrentTurretNumber was -1, outside 0..3 — repaired to 0.
+
+So the rules key did NOT eliminate the -1, and criterion (1) above is **not**
+met — do not delete `RepairTurretIndex` yet.
+
+Ruled out since:
+- **Antares' `PassengerTurret` path** (`Hooks.cpp` ~128,
+  `CurrentTurretNumber = min(NumPassengers, TurretCount-1)`, which yields -1
+  with no passengers) — `[SREF]` does not set `PassengerTurret`.
+- **Any immediate-form write of -1** to `[reg+0x124]`: zero matches across
+  gamemd-spawn.exe, Antares.dll, Phobos.dll and our DLLs. So it arrives via a
+  register, not a constant store.
+- The edit itself: `rulesmd.ini` still holds the key, there is exactly one
+  `[SREF]` section, and no map overrides it.
+
+Open question, and what the next game answers: the repair now also logs
+`TurretWeapon[0]` (type+0x814, confirmed against the game's own setter at
+`0x717890` — `mov [ecx+eax*4+0x814],edx`). That is both what
+`WeaponTurretIndex1=` sets and what `SwitchGunner` copies, so:
+
+- `TurretWeapon[0]=0` → the key landed, and the -1 has a **different** source
+  still to find (most likely the value present at unit creation, before
+  `SwitchGunner` first runs).
+- `TurretWeapon[0]=-1` → the key is not reaching `ReadWeapons`, and the real fix
+  is in the rules/parse path, after which the repair can be deleted.
+
 Related: the seam fix at `0x6FA5BE` (§2) is a *different* issue and should stay
 — that one stops the engine overwriting a value we legitimately own, rather than
 overriding a value we do not.
