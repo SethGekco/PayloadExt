@@ -119,3 +119,108 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 
 	return CanOccupy;
 }
+
+// ===========================================================================
+// The OTHER Occupier gates — the ones that short-circuit before
+// BuildingClass::CanBeOccupiedBy ever runs.
+//
+// 2026-09-08: GGI/SNIPE showed the "enter" cursor on an RA2-mode building and
+// the order was accepted, but they never walked. Cause: `Occupier` is tested in
+// SEVERAL places, and most of them bail *before* calling CanBeOccupiedBy
+// (0x457CE0), which is where our policy lives. Found them all by searching the
+// binary for reads of InfantryTypeClass+0xEB4:
+//
+//     mov cl,[Type+0xEB5]   ; Assaulter
+//     jne proceed
+//     mov cl,[Type+0xEB4]   ; Occupier
+//     je  bail              ; <-- neither -> never reaches CanBeOccupiedBy
+//   proceed:
+//     ...
+//     call 0x457CE0         ; CanBeOccupiedBy
+//
+// So each hook below only has to get PAST the short-circuit; the real decision
+// still happens in CanBeOccupiedBy, where BuildingClass_CanBeOccupiedBy_
+// PayloadPolicy applies the full matrix. The exception is GarrisonBuilding,
+// which never calls CanBeOccupiedBy, so it decides there.
+//
+// Verified offsets: Occupier = InfantryTypeClass+0xEB4, Assaulter = +0xEB5.
+// ===========================================================================
+
+namespace
+{
+	// Would our per-building policy admit this infantry? False for any building
+	// that declares no policy, so untagged buildings behave exactly as vanilla.
+	bool PolicyAdmits(InfantryClass* pInfantry, TechnoClass* pCandidate)
+	{
+		if (!pInfantry || !pCandidate)
+			return false;
+
+		const auto pBuilding = abstract_cast<BuildingClass*>(pCandidate);
+
+		if (!pBuilding || !pBuilding->Type)
+			return false;
+
+		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+
+		if (!pExt || !pExt->HasOccupancyPolicy())
+			return false;
+
+		return TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry);
+	}
+
+	// Reads a techno pointer stored at a raw offset on the infantry. Both call
+	// sites below load the candidate building from such a field immediately
+	// after the branch we are replacing, so the offsets come straight from the
+	// surrounding disassembly.
+	TechnoClass* TechnoAt(InfantryClass* pInfantry, int offset)
+	{
+		return *reinterpret_cast<TechnoClass**>(
+			reinterpret_cast<BYTE*>(pInfantry) + offset);
+	}
+}
+
+// InfantryClass::ActionOnObject @0x51F489 — deciding what the ORDER does.
+// `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
+// 0x51F49D loads the building from [ESI+0x2B4] and calls CanBeOccupiedBy.
+// This is the gate that made the cursor offer "enter" while the order did
+// nothing: the cursor comes from a different function that lacks this check.
+DEFINE_HOOK(0x51F489, InfantryClass_ActionOnObject_PayloadOccupierGate, 0x6)
+{
+	enum { Proceed = 0x51F49D };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4)) ? Proceed : 0;
+}
+
+// InfantryClass::UpdatePosition @0x519698 — the arrival step.
+// `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
+// 0x5196A6 loads the building from [ESI+0x5A4], confirms WhatAmI() == Building
+// (cmp eax,6) and then calls CanBeOccupiedBy.
+DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
+{
+	enum { Proceed = 0x5196A6 };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x5A4)) ? Proceed : 0;
+}
+
+// InfantryClass::GarrisonBuilding @0x522920 — the actual entry.
+// `cmp bl,[eax+0xEB4]` = 6 bytes; BL is 0 from the prologue's `xor ebx,ebx`.
+// ESI = infantry. The building is the first stack argument: the prologue is
+// `sub esp,0xC / push ebx / push esi / push edi`, so at this point it sits at
+// [ESP+0x1C] (0xC + 3 pushes + return address). Confirmed by 0x522937 reading
+// it at [ESP+0x20] after one further `push ebp`.
+//
+// Unlike the two above, this function never calls CanBeOccupiedBy, so the
+// policy decision is made here.
+DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
+{
+	enum { Proceed = 0x52292C };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+	GET_STACK(TechnoClass* const, pBuilding, 0x1C);
+
+	return PolicyAdmits(pInfantry, pBuilding) ? Proceed : 0;
+}
