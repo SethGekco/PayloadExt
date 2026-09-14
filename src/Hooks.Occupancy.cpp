@@ -44,6 +44,10 @@
 #include <InfantryTypeClass.h>
 
 #include <Utilities/Macro.h>
+#include <Utilities/Debug.h>
+
+#include <set>
+#include <utility>
 
 #include <Ext/TechnoType/Body.h>
 
@@ -150,22 +154,37 @@ namespace
 {
 	// Would our per-building policy admit this infantry? False for any building
 	// that declares no policy, so untagged buildings behave exactly as vanilla.
-	bool PolicyAdmits(InfantryClass* pInfantry, TechnoClass* pCandidate)
+	bool PolicyAdmits(InfantryClass* pInfantry, TechnoClass* pCandidate,
+		const char* pGate)
 	{
-		if (!pInfantry || !pCandidate)
+		if (!pInfantry || !pInfantry->Type)
 			return false;
 
 		const auto pBuilding = abstract_cast<BuildingClass*>(pCandidate);
+		const auto pExt = (pBuilding && pBuilding->Type)
+			? TechnoTypeExt::ExtMap.Find(pBuilding->Type) : nullptr;
+		const bool hasPolicy = pExt && pExt->HasOccupancyPolicy();
+		const bool admits = hasPolicy
+			&& TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry);
 
-		if (!pBuilding || !pBuilding->Type)
-			return false;
+		// TEMPORARY DIAGNOSTIC: one line per (gate, infantry, building) so a
+		// single run shows, for every type Rex tries, whether the gate is even
+		// reached, whether the building's policy was seen, what the type's
+		// vanilla Occupier flag actually is, and the final verdict. Guessing at
+		// INI defaults from the disassembly was not converging.
+		static std::set<std::pair<const void*, const void*>> reported;
+		const void* key2 = pBuilding ? (const void*)pBuilding->Type : nullptr;
+		if (reported.emplace((const void*)pGate, key2).second
+			|| reported.emplace((const void*)pInfantry->Type, key2).second)
+		{
+			Debug::Log("[PayloadExt-diag] gate %s: %s -> %s "
+				"(Occupier=%d hasPolicy=%d admits=%d)\n",
+				pGate, pInfantry->Type->ID,
+				(pBuilding && pBuilding->Type) ? pBuilding->Type->ID : "<not-a-building>",
+				(int)pInfantry->Type->Occupier, (int)hasPolicy, (int)admits);
+		}
 
-		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
-
-		if (!pExt || !pExt->HasOccupancyPolicy())
-			return false;
-
-		return TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry);
+		return admits;
 	}
 
 	// Reads a techno pointer stored at a raw offset on the infantry. Both call
@@ -190,7 +209,7 @@ DEFINE_HOOK(0x51F489, InfantryClass_ActionOnObject_PayloadOccupierGate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4)) ? Proceed : 0;
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "ActionOnObject") ? Proceed : 0;
 }
 
 // InfantryClass::UpdatePosition @0x519698 — the arrival step.
@@ -203,7 +222,7 @@ DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x5A4)) ? Proceed : 0;
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x5A4), "UpdatePosition") ? Proceed : 0;
 }
 
 // InfantryClass::GarrisonBuilding @0x522920 — the actual entry.
@@ -222,5 +241,5 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 	GET(InfantryClass* const, pInfantry, ESI);
 	GET_STACK(TechnoClass* const, pBuilding, 0x1C);
 
-	return PolicyAdmits(pInfantry, pBuilding) ? Proceed : 0;
+	return PolicyAdmits(pInfantry, pBuilding, "GarrisonBuilding") ? Proceed : 0;
 }
