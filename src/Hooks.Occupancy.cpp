@@ -47,9 +47,76 @@
 #include <Utilities/Debug.h>
 
 #include <set>
+#include <tuple>
 #include <utility>
 
 #include <Ext/TechnoType/Body.h>
+
+namespace
+{
+	// TEMPORARY DIAGNOSTIC. One line per (infantry type, building type, outcome)
+	// recording what CanBeOccupiedBy finally answered and why. This is the one
+	// question none of the earlier logging could answer: our gates said "admits=1"
+	// yet the unit still never entered, and the actual decision was silent.
+	void Verdict(InfantryClass* pInfantry, BuildingClass* pBuilding, const char* pWhy)
+	{
+		if (!pInfantry || !pInfantry->Type || !pBuilding || !pBuilding->Type)
+			return;
+
+		static std::set<std::tuple<const void*, const void*, const void*>> reported;
+		if (reported.emplace((const void*)pInfantry->Type,
+			(const void*)pBuilding->Type, (const void*)pWhy).second)
+		{
+			Debug::Log("[PayloadExt-diag] VERDICT %s -> %s: %s\n",
+				pInfantry->Type->ID, pBuilding->Type->ID, pWhy);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic only — BuildingClass::CanBeOccupiedBy @0x457CE0, the ENTRY.
+//
+// All nine call sites of this function converge here, so logging the caller's
+// return address says exactly which code path is asking about a given pairing —
+// and, by its absence, which paths never ask at all. That distinction is what
+// the previous rounds kept guessing at.
+//
+// Prologue `sub esp,0xC / push esi / push edi` = exactly 5 bytes, so the steal
+// lands on an instruction boundary. At entry ESP is untouched, so [ESP] is the
+// return address and [ESP+4] the infantry argument — confirmed by 0x457CE5
+// reading that argument as [ESP+0x18] after 0x14 bytes of prologue. Always
+// returns 0; this only observes.
+//
+// Callers, for decoding the logged address:
+//   0x4DFD89 / 0x4DFE54  FootClass, garrison-target selection
+//   0x5196D4             InfantryClass::UpdatePosition
+//   0x51E694             InfantryClass::WhatAction   (the CURSOR)
+//   0x51F4A4             InfantryClass::Mission_Attack
+//   0x51F591             InfantryClass::Mission_Hunt
+//   0x6F832F / 0x6F844E  TechnoClass threat evaluation
+//   0x6FA3CE             TechnoClass::AI
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
+{
+	GET(BuildingClass* const, pBuilding, ECX);
+	GET_STACK(DWORD const, callerAddr, 0x0);
+	GET_STACK(InfantryClass* const, pInfantry, 0x4);
+
+	if (pBuilding && pBuilding->Type && pInfantry && pInfantry->Type)
+	{
+		static std::set<std::tuple<DWORD, const void*, const void*>> reported;
+		if (reported.emplace(callerAddr, (const void*)pInfantry->Type,
+			(const void*)pBuilding->Type).second)
+		{
+			Debug::Log("[PayloadExt-diag] ASKED from 0x%X: %s -> %s "
+				"(Occupier=%d Assaulter=%d)\n",
+				callerAddr, pInfantry->Type->ID, pBuilding->Type->ID,
+				(int)pInfantry->Type->Occupier, (int)pInfantry->Type->Assaulter);
+		}
+	}
+
+	return 0;
+}
 
 // ---------------------------------------------------------------------------
 // Step 1 — get non-Occupier infantry as far as the decision point.
@@ -101,26 +168,42 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 
 	// Not ours -> Antares (or vanilla) decides, untouched.
 	if (!pBldExt || !pBldExt->HasOccupancyPolicy())
+	{
+		Verdict(pInfantry, pBuilding, "no policy -> deferred to Antares/vanilla");
 		return 0;
+	}
 
 	if (!TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
+	{
+		Verdict(pInfantry, pBuilding, "REFUSED by matrix");
 		return CannotOccupy;
+	}
 
 	// We admit it. If the infantry is a normal Occupier the downstream code would
 	// admit it too, so hand back to Antares and let it apply its own extras
 	// (capacity, raidable bunkers, ownership, mind-control). Only a FORCED
 	// non-Occupier has to bypass, because Antares would reject it outright.
 	if (pInfantry->Type->Occupier)
+	{
+		Verdict(pInfantry, pBuilding, "admitted, but Occupier=yes -> deferred to Antares");
 		return 0;
+	}
 
 	// Bypassing means we owe the guards Antares would have applied. Replicate
 	// the two that actually matter for a forced occupant.
 	if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
+	{
+		Verdict(pInfantry, pBuilding, "REFUSED: building full");
 		return CannotOccupy;
+	}
 
 	if (pInfantry->IsMindControlled())
+	{
+		Verdict(pInfantry, pBuilding, "REFUSED: mind-controlled");
 		return CannotOccupy;
+	}
 
+	Verdict(pInfantry, pBuilding, "ADMITTED (forced non-Occupier)");
 	return CanOccupy;
 }
 
@@ -167,21 +250,25 @@ namespace
 		const bool admits = hasPolicy
 			&& TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry);
 
-		// TEMPORARY DIAGNOSTIC: one line per (gate, infantry, building) so a
-		// single run shows, for every type Rex tries, whether the gate is even
-		// reached, whether the building's policy was seen, what the type's
-		// vanilla Occupier flag actually is, and the final verdict. Guessing at
-		// INI defaults from the disassembly was not converging.
-		static std::set<std::pair<const void*, const void*>> reported;
-		const void* key2 = pBuilding ? (const void*)pBuilding->Type : nullptr;
-		if (reported.emplace((const void*)pGate, key2).second
-			|| reported.emplace((const void*)pInfantry->Type, key2).second)
+		// TEMPORARY DIAGNOSTIC: exactly one line per (gate, infantry type,
+		// building type).
+		//
+		// The previous version keyed on (gate,building) OR (infantryType,building)
+		// with a short-circuiting ||, which mixed two key namespaces in one set:
+		// whether a combination printed depended on what had printed before it.
+		// That made ABSENCE of a line unreadable, and I misread it twice — first
+		// concluding a gate was never reached when it simply lost the dedupe.
+		// A single unambiguous triple key is worth the extra entries.
+		static std::set<std::tuple<const void*, const void*, const void*>> reported;
+		if (reported.emplace((const void*)pGate, (const void*)pInfantry->Type,
+			pBuilding ? (const void*)pBuilding->Type : nullptr).second)
 		{
 			Debug::Log("[PayloadExt-diag] gate %s: %s -> %s "
-				"(Occupier=%d hasPolicy=%d admits=%d)\n",
+				"(Occupier=%d Assaulter=%d hasPolicy=%d admits=%d)\n",
 				pGate, pInfantry->Type->ID,
 				(pBuilding && pBuilding->Type) ? pBuilding->Type->ID : "<not-a-building>",
-				(int)pInfantry->Type->Occupier, (int)hasPolicy, (int)admits);
+				(int)pInfantry->Type->Occupier, (int)pInfantry->Type->Assaulter,
+				(int)hasPolicy, (int)admits);
 		}
 
 		return admits;
@@ -198,18 +285,32 @@ namespace
 	}
 }
 
-// InfantryClass::ActionOnObject @0x51F489 — deciding what the ORDER does.
+// InfantryClass::Mission_Attack @0x51F489 — "my target is a building I could
+// garrison, so go garrison it instead of shooting it".
+//
+// ⚠ NAME CORRECTED 2026-09-14. This was called ActionOnObject for six days and
+// the diagnostic labelled it that way; it is WRONG. The InfantryClass vtable at
+// 0x7EB058 puts 0x51F3E0 in slot +0x210, and the function is nop-padded at
+// 0x51F3E0 and runs through 0x51F53E — so 0x51F489 is inside it. Anchoring
+// MissionClass's declared virtual order via QueueMission=+0x1E8 /
+// ForceMission=+0x1F0 (both observed at 0x51F449 / 0x51F4C6) puts Mission_Sleep
+// at +0x204, hence +0x210 = Mission_Attack.
+//
+// It matters: a mission handler runs PER FRAME on a unit that already holds the
+// Attack mission, whereas ActionOnObject would be the one-shot order decision.
+// Reading this as the order path sent me looking for the click handler in the
+// wrong place.
+//
 // `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
-// 0x51F49D loads the building from [ESI+0x2B4] and calls CanBeOccupiedBy.
-// This is the gate that made the cursor offer "enter" while the order did
-// nothing: the cursor comes from a different function that lacks this check.
-DEFINE_HOOK(0x51F489, InfantryClass_ActionOnObject_PayloadOccupierGate, 0x6)
+// 0x51F49D loads the building from [ESI+0x2B4] and calls CanBeOccupiedBy; the
+// success path at 0x51F4AD does SetDestination(building,1) + ForceMission(8).
+DEFINE_HOOK(0x51F489, InfantryClass_MissionAttack_PayloadOccupierGate, 0x6)
 {
 	enum { Proceed = 0x51F49D };
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "ActionOnObject") ? Proceed : 0;
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionAttack") ? Proceed : 0;
 }
 
 // InfantryClass::UpdatePosition @0x519698 — the arrival step.
