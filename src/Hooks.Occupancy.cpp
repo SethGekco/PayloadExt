@@ -351,7 +351,9 @@ DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
 		if (approachLines < 40)
 		{
 			++approachLines;
-			const auto pCell = MapClass::Instance->TryGetCellAt(pInfantry->Location);
+			// MapClass::Instance is a DEFINE_REFERENCE (an object at 0x87F7E8),
+			// not a pointer — same instance the hooked code loads into ECX.
+			const auto pCell = MapClass::Instance.TryGetCellAt(pInfantry->Location);
 			const auto pOnCell = pCell ? pCell->GetBuilding() : nullptr;
 			// admits==true implies PolicyAdmits' abstract_cast succeeded, so the
 			// destination really is a BuildingClass here.
