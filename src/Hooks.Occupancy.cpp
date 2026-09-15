@@ -40,8 +40,10 @@
 
 #include <BuildingClass.h>
 #include <BuildingTypeClass.h>
+#include <CellClass.h>
 #include <InfantryClass.h>
 #include <InfantryTypeClass.h>
+#include <MapClass.h>
 
 #include <Utilities/Macro.h>
 #include <Utilities/Debug.h>
@@ -323,7 +325,49 @@ DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x5A4), "UpdatePosition") ? Proceed : 0;
+	const auto pDest = TechnoAt(pInfantry, 0x5A4);
+	const bool admits = PolicyAdmits(pInfantry, pDest, "UpdatePosition");
+
+	// TEMPORARY DIAGNOSTIC: the approach itself.
+	//
+	// Everything upstream of here is now proven working — our matrix ADMITS the
+	// infantry and it does hold Mission::Capture with the right Destination — yet
+	// it never enters. The only surviving test between this point and the entry
+	// is at 0x5196CD:
+	//
+	//     ecx = MapClass::GetCellAt(this->Location)      ; [esp+0x14], set 0x519664
+	//     edi = this->Destination                        ; 0x5196C2
+	//     call 0x47C520                                  ; CellClass::GetBuilding()
+	//     cmp edi,eax / jne 0x51973C                     ; must be standing ON it
+	//
+	// i.e. the unit has to be physically on the destination building's cell. So
+	// the question is no longer "is it allowed in" but "does it ever arrive".
+	// Logging both sides of that comparison each time the branch runs shows
+	// whether it closes in and stops, or never moves at all. Bounded rather than
+	// deduped, because here the SEQUENCE is the evidence.
+	if (admits)
+	{
+		static int approachLines = 0;
+		if (approachLines < 40)
+		{
+			++approachLines;
+			const auto pCell = MapClass::Instance->TryGetCellAt(pInfantry->Location);
+			const auto pOnCell = pCell ? pCell->GetBuilding() : nullptr;
+			// admits==true implies PolicyAdmits' abstract_cast succeeded, so the
+			// destination really is a BuildingClass here.
+			const auto pDestBld = abstract_cast<BuildingClass*>(pDest);
+			Debug::Log("[PayloadExt-diag] approach %s: loc=(%d,%d) cellBld=%s "
+				"dest=%p destBld=%s %s\n",
+				pInfantry->Type->ID,
+				pInfantry->Location.X, pInfantry->Location.Y,
+				(pOnCell && pOnCell->Type) ? pOnCell->Type->ID : "<none>",
+				(void*)pDest,
+				(pDestBld && pDestBld->Type) ? pDestBld->Type->ID : "<none>",
+				(pOnCell == pDestBld) ? "MATCH -> entering" : "no match");
+		}
+	}
+
+	return admits ? Proceed : 0;
 }
 
 // ---------------------------------------------------------------------------
