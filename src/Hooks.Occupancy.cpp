@@ -464,3 +464,96 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 
 	return PolicyAdmits(pInfantry, pBuilding, "GarrisonBuilding") ? Proceed : 0;
 }
+
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — what mission does the ORDER actually produce?
+//
+// 2026-09-15. The approach trace settled the previous question completely:
+//
+//   approach GHOST: loc=(17088,9536) cellBld=<none> destBld=NABNKR no match
+//   approach GHOST: loc=(16832,9536) cellBld=NABNKR destBld=NABNKR MATCH
+//   gate GarrisonBuilding: GHOST -> NABNKR (Occupier=0 hasPolicy=1 admits=1)
+//
+// GHOST has Occupier=0 and enters all three test buildings — so forced
+// admission of a non-Occupier WORKS end to end. GGI is admitted identically
+// ("VERDICT GGI -> NABNKR: ADMITTED") but is only ever asked from 0x51E699,
+// i.e. WhatAction/the cursor. It never reaches Mission_Attack, Mission_Hunt or
+// UpdatePosition, so it never receives Mission::Capture at all.
+//
+// Both therefore get Action 9 out of WhatAction: the only branch between
+// CanBeOccupiedBy returning true and `mov eax,9` is [ESP+0x13], which is a
+// KEYBOARD MODIFIER (0x54F5C0 tested against the key-binding globals at
+// 0xA8EC00..0C), not a unit property. The divergence has to be downstream, in
+// the translation of that action into an order.
+//
+// Rather than guess which function does that translation — the last three
+// guesses each cost a round trip — watch the assignment itself. These are the
+// shared MissionClass implementations behind vtable +0x1E8 / +0x1F0, so every
+// mission any unit receives passes through here, whoever assigns it.
+//
+//   QueueMission @0x5B35E0: `mov eax,[esp+4]` + `push esi` = exactly 5 bytes
+//   ForceMission @0x5B2FD0: `mov eax,[ecx+0xAC]`           = exactly 6 bytes
+//   At entry: ECX = this, [ESP] = caller's return address, [ESP+4] = mission.
+//   Neither address is hooked by any framework in the registry.
+//
+// Expected shape of the answer: GHOST takes Capture(8) from some address, and
+// GGI either takes a DIFFERENT mission from the same caller (the order is being
+// translated differently) or takes nothing at all (the order never arrives).
+// Those need different fixes, which is exactly why they are worth separating.
+// ===========================================================================
+namespace
+{
+	int MissionLogBudget = 90;
+
+	void LogMissionAssignment(void* pThis, int mission, DWORD caller, const char* pVia)
+	{
+		// Checked first so this costs nothing once spent — these are hot paths.
+		if (MissionLogBudget <= 0)
+			return;
+
+		const auto pInfantry = abstract_cast<InfantryClass*>(
+			static_cast<AbstractClass*>(pThis));
+		if (!pInfantry || !pInfantry->Type)
+			return;
+
+		// +0x2B4 is the objective field every garrison path in this file reads,
+		// and the one the logs have already shown resolving to the right
+		// building. Deliberately reused rather than YRpp's Target member, to
+		// stay consistent with the hooks above instead of assuming they agree.
+		const auto pTarget = abstract_cast<BuildingClass*>(
+			TechnoAt(pInfantry, 0x2B4));
+		const auto pExt = (pTarget && pTarget->Type)
+			? TechnoTypeExt::ExtMap.Find(pTarget->Type) : nullptr;
+		const bool governed = pExt && pExt->HasOccupancyPolicy();
+
+		// Only the pairings under test: either the mission IS the garrison
+		// mission, or this unit is currently aimed at a building we govern.
+		if (mission != static_cast<int>(Mission::Capture) && !governed)
+			return;
+
+		--MissionLogBudget;
+		Debug::Log("[PayloadExt-diag] MISSION %s <- %s(%d) from 0x%X (target=%s)\n",
+			pInfantry->Type->ID, pVia, mission, caller,
+			(pTarget && pTarget->Type) ? pTarget->Type->ID : "<none>");
+	}
+}
+
+DEFINE_HOOK(0x5B35E0, MissionClass_QueueMission_PayloadTrace, 0x5)
+{
+	GET(void* const, pThis, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
+	GET_STACK(int const, mission, 0x4);
+
+	LogMissionAssignment(pThis, mission, caller, "QueueMission");
+	return 0;
+}
+
+DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadTrace, 0x6)
+{
+	GET(void* const, pThis, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
+	GET_STACK(int const, mission, 0x4);
+
+	LogMissionAssignment(pThis, mission, caller, "ForceMission");
+	return 0;
+}
