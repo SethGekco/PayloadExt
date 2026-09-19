@@ -68,6 +68,46 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 	GET(BuildingClass* const, pBuilding, EBP);
 	GET(InfantryClass* const, pInfantry, ESI);
 
+	// TEMPORARY DIAGNOSTIC — did the append actually happen?
+	//
+	// 2026-09-18. GGI reaches this function: the log shows
+	//   gate GarrisonBuilding: GGI -> GAPILE (Occupier=0 hasPolicy=1 admits=1)
+	// so our gate passed it to 0x52292C, and yet it does not end up inside. Past
+	// 0x52292C there is no further Occupier test — the code just inlines
+	// DynamicVector::AddItem (Count++ at 0x522979, `mov [edx+eax*4],esi` at
+	// 0x52297C) and falls through here. The append is skipped ONLY if the vector
+	// cannot grow: Capacity==0 with nothing allocated (0x522951-0x522958), a
+	// CapacityIncrement <= 0 (0x52295A-0x52295F), or a failed resize (0x52296E).
+	//
+	// A co-loaded IntelExt line logged one frame later reports the same GGI as
+	// `limbo=0`, i.e. still in the world rather than inside the building — so
+	// either the append was skipped, or it happened and something ejected it.
+	// Those need different fixes, so log the count on both sides of it. Runs for
+	// every building that declares a policy, not just open-topped ones.
+	if (pInfantry && pInfantry->Type && pBuilding && pBuilding->Type)
+	{
+		const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+		if (pBldExt && pBldExt->HasOccupancyPolicy())
+		{
+			static int entryLines = 0;
+			if (entryLines < 30)
+			{
+				++entryLines;
+				// By this point the inlined AddItem has already run, so Count
+				// includes this occupant if it was appended.
+				const int count = pBuilding->Occupants.Count;
+				const bool present = count > 0
+					&& pBuilding->Occupants.Items[count - 1] == pInfantry;
+				Debug::Log("[PayloadExt-diag] ENTERED %s -> %s: occupants=%d/%d "
+					"appended=%d inLimbo=%d openTopped=%d\n",
+					pInfantry->Type->ID, pBuilding->Type->ID,
+					count, pBuilding->Type->MaxNumberOccupants,
+					(int)present, (int)pInfantry->InLimbo,
+					(int)BuildingIsOpenTopped(pBuilding));
+			}
+		}
+	}
+
 	if (pInfantry && BuildingIsOpenTopped(pBuilding))
 	{
 		// EnteredOpenTopped alone is NOT enough. Every Phobos call site pairs it
