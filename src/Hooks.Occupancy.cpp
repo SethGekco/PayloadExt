@@ -41,6 +41,7 @@
 #include <BuildingClass.h>
 #include <BuildingTypeClass.h>
 #include <CellClass.h>
+#include <HouseClass.h>
 #include <InfantryClass.h>
 #include <InfantryTypeClass.h>
 #include <MapClass.h>
@@ -539,3 +540,87 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 // is built. Removed rather than kept as noise on a hot path. The question it was
 // meant to answer got settled by Rex's C4 A/B instead; see the C4 gate below.
 // Worth remembering: a filter is only valid where the field it reads is live.
+
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — what mission does the PLAYER'S click actually assign?
+//
+// 2026-09-19, after the C4-gate fix did NOT work. What the logs now pin down:
+//
+//   GHOST/E1 click -> ENTERED ... appended=1                      (works)
+//   GGI/SNIPE click -> ASKED from 0x51E699 + VERDICT ADMITTED, then nothing
+//   gate MissionAttack.C4 / MissionCapture.C4 NEVER fire for a policy building,
+//     for ANY unit — not even for GHOST, which succeeds.
+//
+// That last point is the important one and it rules out my previous reading:
+// Mission_Attack and Mission_Capture are not on the successful path at all. The
+// order itself must set BOTH Mission::Capture and the Destination, because
+// UpdatePosition's garrison branch requires GetCurrentMission()==8 and GHOST
+// reaches it without ever passing through those two handlers.
+//
+// So the divergence is inside order execution, and C4 gates it there. There are
+// several `C4 || HasAbility(14)` sites in FootClass around 0x4D53xx-0x4D54xx,
+// one branch of which does SetDestination + QueueMission(0x11 Sabotage) and
+// another SetDestination + QueueMission(8 Capture). Rather than guess which
+// branch each unit takes — that guess has been wrong repeatedly — log the
+// assignment and its CALLER, which names the branch outright.
+//
+// QueueMission @0x5B35E0: `mov eax,[esp+4]` + `push esi` = exactly 5 bytes.
+// ForceMission @0x5B2FD0: `mov eax,[ecx+0xAC]`           = exactly 6 bytes.
+// At entry ECX = this, [ESP] = caller's return address, [ESP+4] = mission.
+// Both unhooked by every framework.
+//
+// FILTER: infantry owned by the CURRENT PLAYER only. The previous attempt at
+// this filtered on mission==Capture and had its whole budget eaten by AI
+// infantry garrisoning civilian buildings before Rex ever clicked. The player
+// issues a handful of orders; the AI issues thousands.
+// ===========================================================================
+namespace
+{
+	int PlayerOrderBudget = 60;
+}
+
+DEFINE_HOOK(0x5B35E0, MissionClass_QueueMission_PayloadPlayerTrace, 0x5)
+{
+	GET(void* const, pThis, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
+	GET_STACK(int const, mission, 0x4);
+
+	if (PlayerOrderBudget > 0)
+	{
+		const auto pInf = abstract_cast<InfantryClass*>(
+			static_cast<AbstractClass*>(pThis));
+		if (pInf && pInf->Type && pInf->Owner && pInf->Owner->IsCurrentPlayer())
+		{
+			--PlayerOrderBudget;
+			Debug::Log("[PayloadExt-diag] PLAYERMISSION %s <- QueueMission(%d) "
+				"from 0x%X (target=%p dest=%p)\n",
+				pInf->Type->ID, mission, caller,
+				(void*)TechnoAt(pInf, 0x2B4), (void*)TechnoAt(pInf, 0x5A4));
+		}
+	}
+
+	return 0;
+}
+
+DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
+{
+	GET(void* const, pThis, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
+	GET_STACK(int const, mission, 0x4);
+
+	if (PlayerOrderBudget > 0)
+	{
+		const auto pInf = abstract_cast<InfantryClass*>(
+			static_cast<AbstractClass*>(pThis));
+		if (pInf && pInf->Type && pInf->Owner && pInf->Owner->IsCurrentPlayer())
+		{
+			--PlayerOrderBudget;
+			Debug::Log("[PayloadExt-diag] PLAYERMISSION %s <- ForceMission(%d) "
+				"from 0x%X (target=%p dest=%p)\n",
+				pInf->Type->ID, mission, caller,
+				(void*)TechnoAt(pInf, 0x2B4), (void*)TechnoAt(pInf, 0x5A4));
+		}
+	}
+
+	return 0;
+}
