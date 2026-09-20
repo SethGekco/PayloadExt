@@ -306,6 +306,64 @@ namespace
 // `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
 // 0x51F49D loads the building from [ESI+0x2B4] and calls CanBeOccupiedBy; the
 // success path at 0x51F4AD does SetDestination(building,1) + ForceMission(8).
+// ===========================================================================
+// THE ACTUAL FIX (2026-09-19) — the C4 gate, upstream of everything else.
+//
+// Rex ran the matched pair and it flipped BOTH ways:
+//     GHOST with C4=yes commented out -> stopped entering (it had worked)
+//     GGI   with C4=yes added         -> started entering (it had failed)
+//     SNIPE untouched (no C4)         -> still fails
+// so `C4=` — not `Occupier=` — is what lets a player's click end in a garrison.
+//
+// InfantryTypeClass::C4 = +0xEC2 (INI key "C4" at 0x825978, read 0x524545,
+// stored 0x524559). It guards the whole garrison-conversion branch at the TOP
+// of both mission handlers:
+//
+//   Mission_Attack  0x51F3E9  mov cl,[Type+0xEC2]      ; C4?
+//                   0x51F3F1  jne 0x51F400             ; yes -> consider it
+//                   0x51F3F3  push 0xE / call 0x70D0D0 ; else HasAbility(14)?
+//                   0x51F3FE  je  0x51F456             ; neither -> never even
+//                                                      ;   looks at the target
+//   Mission_Capture 0x4D4B6F  same shape -> 0x4D4BB4 (SetDestination)
+//
+// 0x70D0D0 is HasAbility: it reads the veterancy struct at techno+0x150 via
+// 0x74FF90/0x750010, so the vanilla rule is "C4 or the ability".
+//
+// Every hook this DLL had — MissionAttack 0x51F489, MissionCapture 0x4D4B96,
+// MissionHunt, UpdatePosition, GarrisonBuilding, CanBeOccupiedBy — sits INSIDE
+// that branch. With no C4 we never reached any of them, which is why admission
+// said "ADMITTED" and nothing happened. The AI Hunt path worked all along
+// because Mission_Hunt (0x51F540) has no C4 gate.
+//
+// So: open the gate for infantry that a policy building would admit. A building
+// with no policy is untouched, and we never suppress the vanilla C4 path — we
+// only ADD a reason to proceed, so C4 units behave exactly as before.
+// ===========================================================================
+DEFINE_HOOK(0x51F3E9, InfantryClass_MissionAttack_PayloadC4Gate, 0x6)
+{
+	enum { ConsiderGarrison = 0x51F400 };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionAttack.C4")
+		? ConsiderGarrison : 0;
+}
+
+// FootClass::Mission_Capture @0x4D4B6F — the same gate on the capture path.
+// ESI and EDI are the same object here: the prologue's branchless
+// abstract_cast leaves EDI = (WhatAmI()==Infantry ? this : nullptr) and
+// 0x4D4B67 has already rejected null, so ESI == EDI. (EDI only becomes the
+// Type later, at 0x4D4B86.) Proceeding lands on SetDestination at 0x4D4BB4.
+DEFINE_HOOK(0x4D4B6F, FootClass_MissionCapture_PayloadC4Gate, 0x6)
+{
+	enum { SetDestinationAndWalk = 0x4D4BB4 };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionCapture.C4")
+		? SetDestinationAndWalk : 0;
+}
+
 DEFINE_HOOK(0x51F489, InfantryClass_MissionAttack_PayloadOccupierGate, 0x6)
 {
 	enum { Proceed = 0x51F49D };
@@ -475,71 +533,9 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 // on every unit) gets spent by AI traffic long before the human test happens —
 // filter on the governed buildings, not on the mission id.
 
-// ===========================================================================
-// TEMPORARY DIAGNOSTIC — does the player's click produce an order at all?
-//
-// 2026-09-18. Deployer is RULED OUT (Rex set Deployer=no on GGI; still refuses),
-// and SNIPE fails on all three buildings too. So it is not one odd flag on GGI.
-//
-// What the logs establish:
-//   GHOST click -> ENTERED GHOST -> GAPILE: occupants=1/4 appended=1 inLimbo=1
-//   GGI   click -> ASKED from 0x51E699 + VERDICT ADMITTED, then NOTHING
-//   GGI   under AI Hunt -> takes Mission::Capture, walks, reaches GarrisonBuilding
-// So GGI is fully capable of garrisoning; only the PLAYER ORDER fails. And
-// WhatAction returns Action::Capture (=9) for it — the only branch between
-// CanBeOccupiedBy succeeding and `mov eax,9` at 0x51E6A8 is the keyboard
-// modifier at [ESP+0x13].
-//
-// The order dispatcher at 0x4C73A5 gets the mission from `call [vtable+0x4A4]`
-// and queues it at 0x4C73B9. For InfantryClass that virtual is 0x4DF0E0, and it
-// merely reads the mission byte out of the EVENT (`movsbl 0xC(%edi),%ebp`). So
-// the Action->Mission decision was already made when the event was built, at
-// click time. This logs what actually arrives, which splits the last fork:
-//
-//   no line for GGI          => no order event is created at all; the click is
-//                               dropped at the input layer, and that gate is
-//                               the thing to hook.
-//   line with mission != 8   => an event IS created but carries the wrong
-//                               mission, and we fix the translation instead.
-//
-// Hook size is 8, NOT 5: the prologue is `push ebx/ebp/esi/edi` (4 bytes) then
-// `mov edi,[esp+0x14]` (4 bytes), so a 5-byte steal would split that mov and
-// Syringe would resume mid-instruction. At entry no pushes have run yet, so
-// [ESP] is the return address and [ESP+4] the event pointer. Unhooked by every
-// framework. Always returns 0; this only observes.
-// ===========================================================================
-DEFINE_HOOK(0x4DF0E0, FootClass_MissionFromEvent_PayloadTrace, 0x8)
-{
-	GET(void* const, pThis, ECX);
-	GET_STACK(BYTE* const, pEvent, 0x4);
-
-	static int orderLines = 0;
-	if (orderLines < 40 && pEvent)
-	{
-		const auto pInfantry = abstract_cast<InfantryClass*>(
-			static_cast<AbstractClass*>(pThis));
-
-		if (pInfantry && pInfantry->Type)
-		{
-			// Only orders aimed at a building we govern, so AI traffic cannot
-			// spend the budget before the human test happens — the mistake the
-			// previous mission trace made.
-			const auto pTarget = abstract_cast<BuildingClass*>(
-				TechnoAt(pInfantry, 0x2B4));
-			const auto pExt = (pTarget && pTarget->Type)
-				? TechnoTypeExt::ExtMap.Find(pTarget->Type) : nullptr;
-
-			if (pExt && pExt->HasOccupancyPolicy())
-			{
-				++orderLines;
-				Debug::Log("[PayloadExt-diag] ORDER %s: eventMission=%d "
-					"target=%s (Occupier=%d)\n",
-					pInfantry->Type->ID,
-					(int)static_cast<signed char>(pEvent[0xC]),
-					pTarget->Type->ID, (int)pInfantry->Type->Occupier);
-			}
-		}
-	}
-
-	return 0;
-}
+// NOTE (2026-09-19): an ORDER trace at 0x4DF0E0 (InfantryClass vtable +0x4A4,
+// the Action->Mission translator) lived here. It produced ZERO lines, because it
+// filtered on the objective at +0x2B4 — which is not yet populated when the event
+// is built. Removed rather than kept as noise on a hot path. The question it was
+// meant to answer got settled by Rex's C4 A/B instead; see the C4 gate below.
+// Worth remembering: a filter is only valid where the field it reads is live.
