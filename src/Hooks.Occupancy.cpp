@@ -624,3 +624,65 @@ DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
 
 	return 0;
 }
+
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — why does the Capture order get reverted?
+//
+// 2026-09-20. The player-order trace finally shows the real failure, and it is
+// NOT the order being wrong:
+//
+//   PLAYERMISSION GGI <- QueueMission(8) from 0x4C73BF     <- correct order!
+//   PLAYERMISSION GGI <- QueueMission(5) from 0x51CD9C     <- reverted to Guard
+//   PLAYERMISSION E1  <- QueueMission(8) from 0x4C73BF     <- and nothing after
+//
+// So GGI DOES receive Mission::Capture from the click, exactly like E1, and is
+// then overridden one call later. Every earlier theory (Occupier, Deployer, the
+// C4 gates in Mission_Attack/Mission_Capture, the event's mission byte) was
+// looking in the wrong place: the order is issued correctly for everyone.
+//
+// 0x51CD9C is the return address of the QueueMission inside the function at
+// 0x51CBA0 = InfantryClass vtable slot +0x484, a two-arg routine that re-derives
+// the unit's mission:
+//
+//   0x51CBE5  mov eax,[this+0x2B4]      ; Target
+//   0x51CBED  je  0x51CC1F              ; NULL -> fall through to idle logic
+//   0x51CC0F  cmp eax,8                 ; else: CurrentMission == Capture?
+//   0x51CC18  mov edi,eax / jmp         ;   yes -> KEEP Capture
+//   ...0x51CD37 mov edi,5               ; otherwise -> Guard
+//   0x51CD96  call [vtable+0x1E8]       ; QueueMission(edi, 0)
+//
+// i.e. the keep-Capture branch needs a non-null Target. So the question is
+// exactly: what is this called with, and what is the unit's state at that
+// moment? Logging the arguments answers it directly instead of another guess.
+//
+// Prologue `mov eax,[esp+8]` + `push ebx` = exactly 5 bytes. At entry ECX =
+// this, [ESP+4] = arg1, [ESP+8] = arg2. Current-player infantry only, bounded.
+// ===========================================================================
+namespace
+{
+	int RetargetBudget = 40;
+}
+
+DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
+{
+	GET(InfantryClass* const, pInf, ECX);
+	GET_STACK(void* const, arg1, 0x4);
+	GET_STACK(void* const, arg2, 0x8);
+
+	if (RetargetBudget > 0 && pInf && pInf->Type
+		&& pInf->Owner && pInf->Owner->IsCurrentPlayer())
+	{
+		--RetargetBudget;
+		const auto pTgt = TechnoAt(pInf, 0x2B4);
+		const auto pDst = TechnoAt(pInf, 0x5A4);
+		const auto pTgtBld = abstract_cast<BuildingClass*>(pTgt);
+		const auto pDstBld = abstract_cast<BuildingClass*>(pDst);
+		Debug::Log("[PayloadExt-diag] RETARGET %s: arg1=%p arg2=%p mission=%d "
+			"target=%p(%s) dest=%p(%s)\n",
+			pInf->Type->ID, arg1, arg2, (int)pInf->CurrentMission,
+			(void*)pTgt, (pTgtBld && pTgtBld->Type) ? pTgtBld->Type->ID : "-",
+			(void*)pDst, (pDstBld && pDstBld->Type) ? pDstBld->Type->ID : "-");
+	}
+
+	return 0;
+}
