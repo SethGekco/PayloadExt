@@ -53,6 +53,7 @@
 #include <Utilities/Debug.h>
 
 #include <cstring>
+#include <map>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -65,6 +66,11 @@ namespace
 	// recording what CanBeOccupiedBy finally answered and why. This is the one
 	// question none of the earlier logging could answer: our gates said "admits=1"
 	// yet the unit still never entered, and the actual decision was silent.
+	// Defined further down, beside the fix that consumes it: remembers which
+	// building we just admitted this infantry into, so Mission_Capture can be
+	// given the target the order failed to carry.
+	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding);
+
 	void Verdict(InfantryClass* pInfantry, BuildingClass* pBuilding, const char* pWhy)
 	{
 		if (!pInfantry || !pInfantry->Type || !pBuilding || !pBuilding->Type)
@@ -185,6 +191,12 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 		Verdict(pInfantry, pBuilding, "REFUSED by matrix");
 		return CannotOccupy;
 	}
+
+	// We are the only place that knows which building the player actually asked
+	// for: the order that follows loses it (see the restore hook at 0x4D4B43).
+	// Recorded for every admission, not just forced ones, so an Occupier that
+	// ever lands in the same bail is covered too.
+	RememberAdmission(pInfantry, pBuilding);
 
 	// We admit it. If the infantry is a normal Occupier the downstream code would
 	// admit it too, so hand back to Antares and let it apply its own extras
@@ -799,65 +811,138 @@ DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 	return 0;
 }
 
+// NOTE (2026-09-21): a SetTarget trace at 0x51B1F0 lived here and produced ZERO
+// lines -- for GGI *and* for E1, which works. So that address is not the SetTarget
+// the order dispatcher reaches, and my vtable +0x3C8 resolution was wrong. Removed
+// rather than kept as a misleading dead end. Recorded because the absence was only
+// interpretable thanks to E1 being in the same run as a positive control: with no
+// known-good case logged alongside, 'no lines' would have looked like a finding.
+
+
 // ===========================================================================
-// TEMPORARY DIAGNOSTIC — does the garrison order carry a TARGET at all?
+// THE FIX — restore the garrison target the order failed to deliver.
 //
-// 2026-09-20, second run. The canceller is now identified exactly:
+// Established over the preceding rounds, all from logs rather than inference:
 //
-//   RETARGET GGI: from 0x4D4BDF arg1=0 arg2=1 mission=8 target=0 dest=0
+//   1. Our matrix admits the unit:
+//        VERDICT GGI -> GAPILE: ADMITTED (forced non-Occupier)
+//   2. The click assigns the right mission:
+//        PLAYERMISSION GGI <- QueueMission(8) from 0x4C73BF
+//   3. A frame later Mission_Capture runs with NO target and cancels it:
+//        RETARGET GGI: from 0x4D4BDF ... mission=8 target=0 dest=0
+//        PLAYERMISSION GGI <- QueueMission(5) from 0x51CD9C
 //
-// 0x4D4BDF is inside FootClass::Mission_Capture, at its BAIL path:
-//     0x4D4BC7  mov eax,[this+0x5A4]   ; Destination
-//     0x4D4BCF  jne 0x4D4C14           ; have one -> keep going
-//     0x4D4BD9  call [vtable+0x484]    ; else CANCEL -> reverts to Guard
-// and it arrives there from the function's very FIRST test:
-//     0x4D4B43  mov ecx,[this+0x2B4]   ; Target
-//     0x4D4B4B  je  0x4D4BC7           ; NULL -> straight to the cancel
+// Mission_Capture's first test is `mov ecx,[this+0x2B4]; je 0x4D4BC7` — a null
+// Target goes straight to the bail, which calls [vtable+0x484] and re-derives
+// the mission to Guard. That is why the C4 gate hooked at 0x4D4B6F never fired:
+// the bail happens 0x2C bytes earlier.
 //
-// So GGI holds Mission::Capture with BOTH Target and Destination null, and the
-// engine correctly concludes there is nothing to capture. That also explains why
-// the C4 gate I hooked at 0x4D4B6F never fired: the bail happens 0x2C bytes
-// earlier. E1 never reaches this path at all (its +0x484 calls come from
-// 0x6F6E30 and 0x520F92, neither of which is Mission_Capture).
+// Why the order arrives without a target is still unexplained, and I have
+// stopped trying to find out by inspection — the last two attempts to name the
+// responsible site were both wrong. What is NOT in doubt is which building the
+// player asked for: CanBeOccupiedBy is called with (building, infantry) and we
+// answer ADMITTED one or two frames earlier. So record that answer and put the
+// target back when the engine reaches Mission_Capture without one.
 //
-// Ruled out as the explanation: QueueMission dispatching inline. The dispatcher
-// calls QueueMission(mission, 0) at 0x4C73B9, and QueueMission only runs the
-// mission when its second argument is true (0x5B3625 tests it before calling
-// NextMission via [vtable+0x1EC]). So Mission_Capture runs a LATER frame, by
-// which time the dispatcher's SetTarget at 0x4C7467 has already happened.
+// This composes with the existing C4-gate hook rather than duplicating it: once
+// Target is non-null the function proceeds normally to 0x4D4B6F, where that hook
+// opens the gate, and vanilla's own SetDestination at 0x4D4BB4 does the walking.
+// We set the target and nothing else.
 //
-// Which leaves exactly two possibilities, needing different fixes:
-//   SetTarget called with the building -> something clears it afterwards
-//   SetTarget called with null         -> the order never carried a target,
-//                                         and the click-time code is at fault
+// SYNC: the admission test runs identically on every machine and the frame
+// counter is synced, so the record and its expiry are deterministic. No RNG, no
+// float, no per-machine state.
 //
-// InfantryClass::SetTarget = 0x51B1F0 (vtable +0x3C8). Prologue
-// `push ebx / push esi / mov esi,ecx / push edi` = exactly 5 bytes. At entry
-// ECX = this, [ESP] = caller, [ESP+4] = the target. Current-player infantry
-// only, bounded. Observes only.
+// POINTER SAFETY: a raw BuildingClass* in a long-lived map is the mistake behind
+// [[aggressivestance-rawptr-map-leak]]. This keeps the window to a handful of
+// frames, erases the entry the moment it is used, and prunes stale entries on
+// every lookup, so a recorded building cannot outlive the order that created it.
 // ===========================================================================
 namespace
 {
-	int SetTargetBudget = 120;
+	struct PendingGarrison
+	{
+		BuildingClass* Building;
+		int Frame;
+	};
+
+	// Deliberately tiny and short-lived; see POINTER SAFETY above.
+	std::map<InfantryClass*, PendingGarrison> PendingGarrisons;
+
+	// The order lands the frame after admission; a couple of frames of slack is
+	// plenty and keeps any stale pointer from surviving long enough to matter.
+	constexpr int PendingGarrisonWindow = 15;
+
+	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding)
+	{
+		if (!pInfantry || !pBuilding)
+			return;
+
+		PendingGarrisons[pInfantry] = { pBuilding, Unsorted::CurrentFrame };
+	}
+
+	BuildingClass* TakeAdmission(InfantryClass* pInfantry)
+	{
+		if (PendingGarrisons.empty())
+			return nullptr;
+
+		const int now = Unsorted::CurrentFrame;
+
+		for (auto it = PendingGarrisons.begin(); it != PendingGarrisons.end(); )
+		{
+			if (now - it->second.Frame > PendingGarrisonWindow)
+				it = PendingGarrisons.erase(it);
+			else
+				++it;
+		}
+
+		const auto it = PendingGarrisons.find(pInfantry);
+		if (it == PendingGarrisons.end())
+			return nullptr;
+
+		const auto pBuilding = it->second.Building;
+		PendingGarrisons.erase(it);
+		return pBuilding;
+	}
 }
 
-DEFINE_HOOK(0x51B1F0, InfantryClass_SetTarget_PayloadTrace, 0x5)
+// FootClass::Mission_Capture @0x4D4B43 — `mov ecx,[esi+0x2B4]`, exactly 6 bytes,
+// the Target load whose null case bails. ESI = this (set by `mov esi,ecx` in the
+// prologue). We return 0 in every case: Syringe runs the stolen bytes after us,
+// so the re-read picks up whatever we just stored and the engine carries on as
+// if the order had carried the target all along.
+DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRestoreTarget, 0x6)
 {
-	GET(InfantryClass* const, pInf, ECX);
-	GET_STACK(DWORD const, caller, 0x0);
-	GET_STACK(TechnoClass* const, pTarget, 0x4);
+	GET(TechnoClass* const, pThis, ESI);
 
-	if (SetTargetBudget > 0 && pInf && pInf->Type
-		&& pInf->Owner && pInf->Owner->IsCurrentPlayer())
+	const auto pInfantry = abstract_cast<InfantryClass*>(pThis);
+	if (!pInfantry || !pInfantry->Type)
+		return 0;
+
+	// Only step in when the engine has nothing to work with. A real target is
+	// always left alone.
+	if (TechnoAt(pInfantry, 0x2B4))
+		return 0;
+
+	const auto pBuilding = TakeAdmission(pInfantry);
+	if (!pBuilding || !pBuilding->Type)
+		return 0;
+
+	// Re-check rather than trust the record: the building may have filled up or
+	// changed hands since we admitted, and this is the last point at which a
+	// wrong answer is still cheap to refuse.
+	const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+	if (!pBldExt || !pBldExt->HasOccupancyPolicy()
+		|| !TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
 	{
-		--SetTargetBudget;
-		const auto pBld = abstract_cast<BuildingClass*>(pTarget);
-		Debug::Log("[PayloadExt-diag] SETTARGET %s: from 0x%X target=%p(%s) "
-			"mission=%d oldTarget=%p\n",
-			pInf->Type->ID, caller, (void*)pTarget,
-			(pBld && pBld->Type) ? pBld->Type->ID : "-",
-			(int)pInf->CurrentMission, (void*)TechnoAt(pInf, 0x2B4));
+		return 0;
 	}
+
+	*reinterpret_cast<BuildingClass**>(
+		reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = pBuilding;
+
+	Debug::Log("[PayloadExt-diag] RESTORED %s -> %s: target reinstated for "
+		"Mission::Capture\n", pInfantry->Type->ID, pBuilding->Type->ID);
 
 	return 0;
 }
