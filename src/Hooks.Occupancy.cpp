@@ -45,10 +45,14 @@
 #include <InfantryClass.h>
 #include <InfantryTypeClass.h>
 #include <MapClass.h>
+#include <UnitClass.h>
+#include <UnitTypeClass.h>
+#include <Unsorted.h>
 
 #include <Utilities/Macro.h>
 #include <Utilities/Debug.h>
 
+#include <cstring>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -579,11 +583,116 @@ namespace
 	int PlayerOrderBudget = 60;
 }
 
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — "the IFV drives off to attack the enemy base the
+// moment it is built. Which DLL did that?"
+//
+// 2026-09-20. Twenty-seven DLLs are injected and roughly a third of them can
+// issue missions, so reading sources to find the guilty one is guesswork. The
+// order itself already carries the answer: whoever assigns the mission leaves
+// their RETURN ADDRESS on the stack. Log it and resolve it to a module
+// in-process, and the culprit names itself in one game.
+//
+// Reading the caller:
+//   * inside gamemd-spawn.exe  -> vanilla / spawner logic, no DLL involved
+//   * inside SomeExt.dll       -> that DLL, at the printed offset
+//   * no module at all         -> a Syringe stub; read the `push <origin>` at
+//                                 stub_base+0x02 to get the hooked address
+//                                 (see syringe-hook-size-resume-boundary).
+//
+// Filter is the type ID prefix "FV", which covers FV plus the TraitExt
+// per-instance variants FV$0 / FV$1, and deliberately does NOT filter by owner
+// — only the Allied human can build one here, and an owner filter would hide
+// the case where something reassigns the unit's house. Change TraceIdPrefix to
+// point this at a different unit.
+//
+// Budget-bounded and observation-only (always returns 0). Delete this block,
+// the two calls below and TraceIdPrefix once the question is answered.
+// ===========================================================================
+namespace
+{
+	constexpr const char* TraceIdPrefix = "FV";
+	int VehicleOrderBudget = 80;
+
+	const char* MissionName(int mission)
+	{
+		switch (mission)
+		{
+		case  0: return "Sleep";      case  1: return "Attack";
+		case  2: return "Move";       case  3: return "QMove";
+		case  4: return "Retreat";    case  5: return "Guard";
+		case  6: return "Sticky";     case  7: return "Enter";
+		case  8: return "Capture";    case 10: return "Harvest";
+		case 11: return "AreaGuard";  case 12: return "Return";
+		case 13: return "Stop";       case 14: return "Ambush";
+		case 15: return "HUNT";       case 16: return "Unload";
+		case 17: return "Sabotage";   case 25: return "Patrol";
+		default: return "?";
+		}
+	}
+
+	// Name the module a code address lives in, and its offset within it.
+	// Static buffer, single-threaded game loop, printed immediately — no
+	// lifetime concerns. Returns "SYRINGE-STUB-or-heap" when the address
+	// belongs to no loaded image, which is itself the answer: a Syringe stub.
+	const char* ModuleOf(DWORD address, DWORD& offset)
+	{
+		offset = 0;
+
+		HMODULE hMod = nullptr;
+		if (!GetModuleHandleExA(
+				GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+					| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(address), &hMod)
+			|| !hMod)
+			return "SYRINGE-STUB-or-heap";
+
+		offset = address - static_cast<DWORD>(reinterpret_cast<size_t>(hMod));
+
+		static char path[MAX_PATH];
+		if (!GetModuleFileNameA(hMod, path, MAX_PATH))
+			return "<unnamed module>";
+
+		const char* const slash = strrchr(path, '\\');
+		return slash ? slash + 1 : path;
+	}
+
+	void TraceVehicleOrder(void* pThis, DWORD caller, int mission, const char* pHow)
+	{
+		if (VehicleOrderBudget <= 0)
+			return;
+
+		const auto pUnit = abstract_cast<UnitClass*>(
+			static_cast<AbstractClass*>(pThis));
+		if (!pUnit || !pUnit->Type || !pUnit->Owner)
+			return;
+		if (_strnicmp(pUnit->Type->ID, TraceIdPrefix, strlen(TraceIdPrefix)) != 0)
+			return;
+
+		--VehicleOrderBudget;
+
+		DWORD offset = 0;
+		const char* const pModule = ModuleOf(caller, offset);
+
+		Debug::Log("[PayloadExt-diag] IFVORDER %s@%p (%s#%d) <- %s(%d %s) "
+			"from 0x%X [%s+0x%X] was=%d target=%p dest=%p frame=%d\n",
+			pUnit->Type->ID, (void*)pUnit,
+			pUnit->Owner->get_ID(), pUnit->Owner->ArrayIndex,
+			pHow, mission, MissionName(mission), caller,
+			pModule, offset,
+			(int)pUnit->CurrentMission,
+			(void*)pUnit->Target, (void*)pUnit->Destination,
+			Unsorted::CurrentFrame);
+	}
+}
+
 DEFINE_HOOK(0x5B35E0, MissionClass_QueueMission_PayloadPlayerTrace, 0x5)
 {
 	GET(void* const, pThis, ECX);
 	GET_STACK(DWORD const, caller, 0x0);
 	GET_STACK(int const, mission, 0x4);
+
+	TraceVehicleOrder(pThis, caller, mission, "QueueMission");
 
 	if (PlayerOrderBudget > 0)
 	{
@@ -607,6 +716,8 @@ DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
 	GET(void* const, pThis, ECX);
 	GET_STACK(DWORD const, caller, 0x0);
 	GET_STACK(int const, mission, 0x4);
+
+	TraceVehicleOrder(pThis, caller, mission, "ForceMission");
 
 	if (PlayerOrderBudget > 0)
 	{
