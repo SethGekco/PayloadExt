@@ -687,3 +687,66 @@ DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 
 	return 0;
 }
+
+// ===========================================================================
+// TEMPORARY DIAGNOSTIC — does the garrison order carry a TARGET at all?
+//
+// 2026-09-20, second run. The canceller is now identified exactly:
+//
+//   RETARGET GGI: from 0x4D4BDF arg1=0 arg2=1 mission=8 target=0 dest=0
+//
+// 0x4D4BDF is inside FootClass::Mission_Capture, at its BAIL path:
+//     0x4D4BC7  mov eax,[this+0x5A4]   ; Destination
+//     0x4D4BCF  jne 0x4D4C14           ; have one -> keep going
+//     0x4D4BD9  call [vtable+0x484]    ; else CANCEL -> reverts to Guard
+// and it arrives there from the function's very FIRST test:
+//     0x4D4B43  mov ecx,[this+0x2B4]   ; Target
+//     0x4D4B4B  je  0x4D4BC7           ; NULL -> straight to the cancel
+//
+// So GGI holds Mission::Capture with BOTH Target and Destination null, and the
+// engine correctly concludes there is nothing to capture. That also explains why
+// the C4 gate I hooked at 0x4D4B6F never fired: the bail happens 0x2C bytes
+// earlier. E1 never reaches this path at all (its +0x484 calls come from
+// 0x6F6E30 and 0x520F92, neither of which is Mission_Capture).
+//
+// Ruled out as the explanation: QueueMission dispatching inline. The dispatcher
+// calls QueueMission(mission, 0) at 0x4C73B9, and QueueMission only runs the
+// mission when its second argument is true (0x5B3625 tests it before calling
+// NextMission via [vtable+0x1EC]). So Mission_Capture runs a LATER frame, by
+// which time the dispatcher's SetTarget at 0x4C7467 has already happened.
+//
+// Which leaves exactly two possibilities, needing different fixes:
+//   SetTarget called with the building -> something clears it afterwards
+//   SetTarget called with null         -> the order never carried a target,
+//                                         and the click-time code is at fault
+//
+// InfantryClass::SetTarget = 0x51B1F0 (vtable +0x3C8). Prologue
+// `push ebx / push esi / mov esi,ecx / push edi` = exactly 5 bytes. At entry
+// ECX = this, [ESP] = caller, [ESP+4] = the target. Current-player infantry
+// only, bounded. Observes only.
+// ===========================================================================
+namespace
+{
+	int SetTargetBudget = 120;
+}
+
+DEFINE_HOOK(0x51B1F0, InfantryClass_SetTarget_PayloadTrace, 0x5)
+{
+	GET(InfantryClass* const, pInf, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
+	GET_STACK(TechnoClass* const, pTarget, 0x4);
+
+	if (SetTargetBudget > 0 && pInf && pInf->Type
+		&& pInf->Owner && pInf->Owner->IsCurrentPlayer())
+	{
+		--SetTargetBudget;
+		const auto pBld = abstract_cast<BuildingClass*>(pTarget);
+		Debug::Log("[PayloadExt-diag] SETTARGET %s: from 0x%X target=%p(%s) "
+			"mission=%d oldTarget=%p\n",
+			pInf->Type->ID, caller, (void*)pTarget,
+			(pBld && pBld->Type) ? pBld->Type->ID : "-",
+			(int)pInf->CurrentMission, (void*)TechnoAt(pInf, 0x2B4));
+	}
+
+	return 0;
+}
