@@ -192,12 +192,6 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 		return CannotOccupy;
 	}
 
-	// We are the only place that knows which building the player actually asked
-	// for: the order that follows loses it (see the restore hook at 0x4D4B43).
-	// Recorded for every admission, not just forced ones, so an Occupier that
-	// ever lands in the same bail is covered too.
-	RememberAdmission(pInfantry, pBuilding);
-
 	// We admit it. If the infantry is a normal Occupier the downstream code would
 	// admit it too, so hand back to Antares and let it apply its own extras
 	// (capacity, raidable bunkers, ownership, mind-control). Only a FORCED
@@ -223,6 +217,21 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	}
 
 	Verdict(pInfantry, pBuilding, "ADMITTED (forced non-Occupier)");
+
+	// Record ONLY here — on the path that actually says yes.
+	//
+	// 2026-09-21: this used to run right after AdmitsOccupant, i.e. BEFORE the
+	// capacity check and before the Occupier early-return. Two bugs fell out of
+	// that, both seen in game:
+	//   * a FULL building was still recorded, so the restore hook reinstated the
+	//     target, the infantry walked over, was refused entry, and — now holding
+	//     the building as its TARGET — opened fire on its owner's own structure;
+	//   * Occupiers were recorded too, though they never need help, and the
+	//     stale target made them pace back and forth in front of a full building.
+	// Admission is the only thing that licenses a restore, so only a completed
+	// admission may record one.
+	RememberAdmission(pInfantry, pBuilding);
+
 	return CanOccupy;
 }
 
@@ -937,6 +946,14 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRestoreTarget, 0x6)
 	{
 		return 0;
 	}
+
+	// Capacity is re-checked here as well as at admission, because the race is
+	// real: other infantry can fill the last slot during the frames between the
+	// two. Restoring a target we cannot use is worse than doing nothing — the
+	// unit walks over, is refused, and then attacks the building it was sent to
+	// occupy. Leaving the target null simply lets the order lapse.
+	if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
+		return 0;
 
 	*reinterpret_cast<BuildingClass**>(
 		reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = pBuilding;
