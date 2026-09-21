@@ -660,12 +660,13 @@ DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
 // ===========================================================================
 namespace
 {
-	int RetargetBudget = 40;
+	int RetargetBudget = 120;
 }
 
 DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 {
 	GET(InfantryClass* const, pInf, ECX);
+	GET_STACK(DWORD const, caller, 0x0);
 	GET_STACK(void* const, arg1, 0x4);
 	GET_STACK(void* const, arg2, 0x8);
 
@@ -677,9 +678,9 @@ DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 		const auto pDst = TechnoAt(pInf, 0x5A4);
 		const auto pTgtBld = abstract_cast<BuildingClass*>(pTgt);
 		const auto pDstBld = abstract_cast<BuildingClass*>(pDst);
-		Debug::Log("[PayloadExt-diag] RETARGET %s: arg1=%p arg2=%p mission=%d "
+		Debug::Log("[PayloadExt-diag] RETARGET %s: from 0x%X arg1=%p arg2=%p mission=%d "
 			"target=%p(%s) dest=%p(%s)\n",
-			pInf->Type->ID, arg1, arg2, (int)pInf->CurrentMission,
+			pInf->Type->ID, caller, arg1, arg2, (int)pInf->CurrentMission,
 			(void*)pTgt, (pTgtBld && pTgtBld->Type) ? pTgtBld->Type->ID : "-",
 			(void*)pDst, (pDstBld && pDstBld->Type) ? pDstBld->Type->ID : "-");
 	}
