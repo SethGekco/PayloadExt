@@ -977,7 +977,16 @@ namespace
 		PendingGarrisons[pInfantry] = { pBuilding->Location, Unsorted::CurrentFrame };
 	}
 
-	BuildingClass* TakeAdmission(InfantryClass* pInfantry)
+	void ForgetAdmission(InfantryClass* pInfantry)
+	{
+		PendingGarrisons.erase(pInfantry);
+	}
+
+	// Resolve WITHOUT consuming. The record has to survive every frame of the
+	// journey now, because it is the only thing that pins the unit to the building
+	// the player actually chose; consuming it on first use is what let the engine's
+	// own search wander off to other structures.
+	BuildingClass* PeekAdmission(InfantryClass* pInfantry)
 	{
 		if (PendingGarrisons.empty())
 			return nullptr;
@@ -997,7 +1006,6 @@ namespace
 			return nullptr;
 
 		const auto where = it->second.Where;
-		PendingGarrisons.erase(it);
 
 		// Re-resolve rather than trust anything remembered: whatever is on that
 		// cell now is the only thing safe to act on.
@@ -1053,119 +1061,76 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	if (!pInfantry || !pInfantry->Type)
 		return 0;
 
-	const auto pRouted = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x5A4));
+	// The building the PLAYER chose, resolved fresh from its cell each frame and
+	// deliberately not consumed: it is what pins the unit to that one structure.
+	const auto pChosen = PeekAdmission(pInfantry);
+	if (!pChosen)
+		return 0;
 
-	// Already walking to a building we govern: cancel if it stopped being
-	// enterable (someone else took the last slot while this unit was crossing
-	// the map — the over-order case), otherwise leave it to finish the journey.
-	if (pRouted && IsGovernedBuilding(pRouted))
+	const auto SetSeek = [pInfantry](BYTE v)
 	{
-		if (!GarrisonStillPossible(pRouted, pInfantry))
-		{
-			// Destination only. With Target never set, dropping the Destination
-			// sends the next frame through 0x4D4BC7 to the engine's own cancel,
-			// which re-derives to Guard: a quiet lapse, no attack, no retry.
-			pInfantry->SetDestination(nullptr, true);
+		*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = v;
+	};
 
-			// Drop the garrison-seek flag as well, or Mission_Guard would send the
-			// unit hunting for a different building the player never chose.
-			*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 0;
-
-			GarrisonTrace::Event(pInfantry, "lapsed", pRouted);
-
-			static std::set<std::pair<const void*, const void*>> lapsed;
-			if (lapsed.emplace((const void*)pInfantry->Type,
-				(const void*)pRouted->Type).second)
-			{
-				Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: no longer enterable "
-					"(occupants %d/%d); destination cleared\n",
-					pInfantry->Type->ID, pRouted->Type->ID,
-					pRouted->GetOccupantCount(),
-					pRouted->Type->MaxNumberOccupants);
-			}
-		}
-
-		// STILL POSSIBLE — make sure the engine's garrison-seek is running.
-		//
-		// 2026-09-24, from the lifecycle trace. The control made this obvious:
-		//     E2  mission=Capture dest=CANEWY15 seekGarrison=1  -> survives 219 frames
-		//     GGI mission=Capture dest=GAPILE   seekGarrison=0  -> wiped the next frame
-		// The engine sets +0x691 itself for an Occupier, and that flag is what keeps
-		// the order alive: Mission_Guard's dispatcher (0x4D5070) calls
-		// FindGarrisonStructure every frame while it is set, which re-establishes the
-		// destination. Without it nothing re-establishes anything, so the first
-		// cancel that comes along wins and the mission drops back to Guard.
-		//
-		// GGI never got the flag because of a hole in MY code, not the engine's: the
-		// order dispatcher had already put GAPILE in Destination, so this hook took
-		// the "already routed, leave it alone" path and returned — and the flag was
-		// only ever raised on the other branch, the one that never ran. Raise it
-		// here too. Idempotent, so it is safe to re-assert every frame.
-		if (!FieldByteAt(pInfantry, 0x691))
-		{
-			*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 1;
-			GarrisonTrace::Event(pInfantry, "seek-flag-raised", pRouted);
-		}
-
+	// ---- 1. Already inside: stop driving, and above all STOP SEEKING. --------
+	//
+	// 2026-09-24. The trace shows GGI genuinely entering —
+	//     ENTERED GGI -> GAPILE: occupants=2/4 appended=1 inLimbo=1
+	// — and then walking straight back out. That was me. GarrisonBuilding clears
+	// both seek flags on entry (0x5229F4/0x5229FA); my hook re-raised +0x691 the
+	// very next frame, Mission_Guard's dispatcher called FindGarrisonStructure
+	// again, and the unit left to go and find a building. Matching the engine and
+	// clearing on entry is the fix; forgetting the record stops it recurring.
+	if (pInfantry->InLimbo)
+	{
+		SetSeek(0);
+		ForgetAdmission(pInfantry);
+		GarrisonTrace::Event(pInfantry, "inside-stop-seeking", pChosen);
 		return 0;
 	}
 
-	// A real Target means vanilla is driving this; stay out of it.
-	if (TechnoAt(pInfantry, 0x2B4))
+	// ---- 2. No longer enterable: lapse quietly. -----------------------------
+	if (!GarrisonStillPossible(pChosen, pInfantry))
+	{
+		SetSeek(0);
+		pInfantry->SetDestination(nullptr, true);
+		ForgetAdmission(pInfantry);
+
+		static std::set<std::pair<const void*, const void*>> lapsed;
+		if (lapsed.emplace((const void*)pInfantry->Type,
+			(const void*)pChosen->Type).second)
+		{
+			Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: no longer enterable "
+				"(occupants %d/%d); destination and seek cleared\n",
+				pInfantry->Type->ID, pChosen->Type->ID,
+				pChosen->GetOccupantCount(), pChosen->Type->MaxNumberOccupants);
+		}
+
+		GarrisonTrace::Event(pInfantry, "lapsed", pChosen);
 		return 0;
+	}
 
-	// NOTE: an existing Destination is deliberately NOT a reason to bail.
+	// ---- 3. En route: pin to the chosen building and keep the seek alive. ----
 	//
-	// 2026-09-23: it was, and that broke entry completely (ROUTED=0 in the log).
-	// The order dispatcher already sets a Destination at 0x4C747C, but to the
-	// CELL the player clicked — not to the building. UpdatePosition's arrival
-	// test compares the destination against the building itself:
-	//     0x5196C8  call 0x47C520      ; cell->GetBuilding()
-	//     0x5196CD  cmp edi,eax        ; edi = Destination, must BE the building
-	// so a cell destination never matches and the unit walks up and stands there.
-	// The earlier Target-based version only worked because vanilla's own
-	// SetDestination at 0x4D4BB4 overwrote that cell with the building. Doing the
-	// same thing explicitly is the whole job here.
-	const auto pBuilding = TakeAdmission(pInfantry);
-	if (!pBuilding || !GarrisonStillPossible(pBuilding, pInfantry))
-		return 0;
+	// Pinning matters as much as seeking. FindGarrisonStructure picks the NEAREST
+	// valid structure, not the one that was clicked, so leaving it unsupervised is
+	// what made units "randomly try another structure" when the intended one
+	// filled up or was sold. Re-asserting the destination every frame keeps the
+	// engine's search on the player's choice, and step 2 is the only thing allowed
+	// to give up.
+	const auto pDest = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x5A4));
 
-	pInfantry->SetDestination(pBuilding, true);
+	if (pDest != pChosen)
+	{
+		pInfantry->SetDestination(pChosen, true);
+		GarrisonTrace::Event(pInfantry, "routed", pChosen);
+	}
 
-	// ------------------------------------------------------------------
-	// Also hand the job to the ENGINE'S OWN garrison-seek, which is what I should
-	// have used from the start instead of reconstructing an order by hand.
-	//
-	// FootClass+0x691 is a "seek a garrison structure" flag. The dispatcher at
-	// 0x4D5070 — reached from InfantryClass::Mission_Guard (0x51F62F) — tests three
-	// such flags and calls the matching finder:
-	//     0x4D5076  +0x68F -> [vtable+0x340]   tank bunker
-	//     0x4D508A  +0x690 -> [vtable+0x348]   FindBattleBunker
-	//     0x4D50A0  +0x691 -> [vtable+0x34C]   FindGarrisonStructure
-	//
-	// FindGarrisonStructure (0x4DFE00) then does the whole job the vanilla way:
-	// it walks the building array, asks CanBeOccupiedBy about each candidate
-	// (0x4DFE54 — so OUR policy hook decides, and a forced occupant is accepted),
-	// picks the nearest, sets this flag and SetDestination, and clears the flag
-	// again at 0x4DFEEF if nothing suitable is found. Verified by disassembly that
-	// it reads neither Occupier (+0xEB4) nor C4 (+0xEC2), so nothing in it excludes
-	// the types we are trying to admit.
-	//
-	// This is the same route the AI teams use (0x6E9F1C) and the one occupants take
-	// after being evicted, so it is well-trodden rather than novel. Crucially it
-	// never touches Target, so it cannot produce the attack line or the stray shot.
-	//
-	// Set alongside the destination rather than instead of it: the destination
-	// carries the player's actual choice, and the flag is the safety net if the
-	// Capture order lapses to Guard before the unit arrives.
-	// ------------------------------------------------------------------
-	*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 1;
-
-	GarrisonTrace::Event(pInfantry, "routed", pBuilding);
-
-	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination set + garrison-seek "
-		"flag (+0x691) raised for the engine's own FindGarrisonStructure\n",
-		pInfantry->Type->ID, pBuilding->Type->ID);
+	if (!FieldByteAt(pInfantry, 0x691))
+	{
+		SetSeek(1);
+		GarrisonTrace::Event(pInfantry, "seek-flag-raised", pChosen);
+	}
 
 	return 0;
 }
