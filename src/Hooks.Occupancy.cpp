@@ -71,6 +71,45 @@ namespace
 	// given the target the order failed to carry.
 	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding);
 
+	// Can this infantry still get into this building RIGHT NOW?
+	//
+	// 2026-09-23: AdmitsOccupant answers "is this type allowed in", which is NOT
+	// the same question and in particular ignores CAPACITY. Using it as the gate
+	// sent units to full buildings: the walk branch ran, SetDestination filled in
+	// a Destination, and from then on 0x4D4B5F jumped past every refusal path, so
+	// the unit stood at a full building holding it as Target -- and Target is the
+	// field an attack reads, so it opened fire. Every decision about whether to
+	// keep pursuing a garrison goes through here now.
+	bool GarrisonStillPossible(BuildingClass* pBuilding, InfantryClass* pInfantry)
+	{
+		if (!pBuilding || !pBuilding->Type || !pInfantry || !pInfantry->Type)
+			return false;
+
+		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+		if (!pExt || !pExt->HasOccupancyPolicy())
+			return false;
+
+		if (!TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
+			return false;
+
+		// The one that was missing.
+		if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
+			return false;
+
+		return !pInfantry->IsMindControlled();
+	}
+
+	// True when this building is one we govern, i.e. safe for us to touch the
+	// unit's Target over. Untagged buildings are never interfered with.
+	bool IsGovernedBuilding(BuildingClass* pBuilding)
+	{
+		if (!pBuilding || !pBuilding->Type)
+			return false;
+
+		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+		return pExt && pExt->HasOccupancyPolicy();
+	}
+
 	void Verdict(InfantryClass* pInfantry, BuildingClass* pBuilding, const char* pWhy)
 	{
 		if (!pInfantry || !pInfantry->Type || !pBuilding || !pBuilding->Type)
@@ -386,57 +425,16 @@ DEFINE_HOOK(0x4D4B6F, FootClass_MissionCapture_PayloadC4Gate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	const auto pTarget = TechnoAt(pInfantry, 0x2B4);
+	// GarrisonStillPossible, not PolicyAdmits: a full building must not be walked
+	// to. Cancelling is handled once, at 0x4D4B43, which runs earlier in the same
+	// frame -- so by the time we get here an impossible garrison has already had
+	// its Target cleared and we simply will not see one.
+	const auto pBuilding = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x2B4));
 
-	if (PolicyAdmits(pInfantry, pTarget, "MissionCapture.C4"))
-		return SetDestinationAndWalk;
-
-	// ------------------------------------------------------------------
-	// Refused — and if a Target is still set we must CLEAR it, or the order
-	// neither completes nor lapses.
-	//
-	// 2026-09-21, from Rex seeing a SNIPE shoot the building it was sent to
-	// occupy. Once a Target is present the cancel path cannot end the order:
-	//
-	//   0x4D4B4B  Target non-null        -> continue past the early bail
-	//   0x4D4B6F  admits? NO             -> vanilla checks all fail
-	//   0x4D4BC7  Destination null       -> cancel via [vtable+0x484]
-	//   0x51CC0F  Target non-null AND CurrentMission==8 -> KEEPS Capture
-	//
-	// so it re-enters Mission_Capture next frame with the same state, forever.
-	// That is the "keeps trying" half. The other half is that Target is the
-	// same field an attack reads, so a unit parked on a building it cannot
-	// enter simply opens fire on it — on its owner's own structure.
-	//
-	// Capacity is re-checked at injection, but this race is genuine: the last
-	// slot can be taken while the unit is still walking, which is exactly what
-	// happened to the SNIPE. So handle refusal at arrival too, by clearing the
-	// Target: the cancel then finds nothing to capture and re-derives to Guard,
-	// which is the quiet lapse vanilla would have produced.
-	//
-	// Scoped deliberately: only when the mission really is Capture, only when
-	// there is no Destination, and only for a building that declares a policy.
-	// A force-fire order on your own building is Mission::Attack, not Capture,
-	// so it cannot be caught by this.
-	// ------------------------------------------------------------------
-	if (pTarget && pInfantry->CurrentMission == Mission::Capture
-		&& !TechnoAt(pInfantry, 0x5A4))
+	if (GarrisonStillPossible(pBuilding, pInfantry))
 	{
-		if (const auto pBuilding = abstract_cast<BuildingClass*>(pTarget))
-		{
-			const auto pBldExt = pBuilding->Type
-				? TechnoTypeExt::ExtMap.Find(pBuilding->Type) : nullptr;
-
-			if (pBldExt && pBldExt->HasOccupancyPolicy())
-			{
-				*reinterpret_cast<TechnoClass**>(
-					reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = nullptr;
-
-				Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: refused on arrival, "
-					"target cleared so the order ends instead of looping\n",
-					pInfantry->Type->ID, pBuilding->Type->ID);
-			}
-		}
+		PolicyAdmits(pInfantry, pBuilding, "MissionCapture.C4");
+		return SetDestinationAndWalk;
 	}
 
 	return 0;
@@ -980,31 +978,67 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRestoreTarget, 0x6)
 	if (!pInfantry || !pInfantry->Type)
 		return 0;
 
-	// Only step in when the engine has nothing to work with. A real target is
-	// always left alone.
-	if (TechnoAt(pInfantry, 0x2B4))
-		return 0;
+	const auto pExisting = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x2B4));
 
-	const auto pBuilding = TakeAdmission(pInfantry);
-	if (!pBuilding || !pBuilding->Type)
-		return 0;
-
-	// Re-check rather than trust the record: the building may have filled up or
-	// changed hands since we admitted, and this is the last point at which a
-	// wrong answer is still cheap to refuse.
-	const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
-	if (!pBldExt || !pBldExt->HasOccupancyPolicy()
-		|| !TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
+	// ------------------------------------------------------------------
+	// CANCEL — a garrison that can no longer happen must not keep its Target.
+	//
+	// This hook is the first thing in Mission_Capture, so it runs EVERY frame the
+	// mission is active. That is deliberate and is what the previous attempt got
+	// wrong: cancelling from the 0x4D4B6F gate only worked before the unit started
+	// walking. Once SetDestination had run, 0x4D4B5F jumped straight past the gate
+	// and the refusal branch became unreachable — so a unit that set off toward a
+	// building which filled up *while it walked* kept its Target forever, and
+	// Target is the field an attack reads. It shot the building it was sent to
+	// occupy, which is exactly what Rex saw with a SNIPE and then with everyone.
+	//
+	// Clearing Target here makes the engine's own bail (0x4D4B4B -> 0x4D4BC7) take
+	// over: with neither Target nor Destination the cancel re-derives to Guard and
+	// the order lapses quietly, which is what vanilla does when a garrison is not
+	// available.
+	//
+	// Scoped to buildings we govern, so an ordinary attack order on any other
+	// structure is untouched.
+	// ------------------------------------------------------------------
+	if (pExisting)
 	{
+		if (IsGovernedBuilding(pExisting)
+			&& !GarrisonStillPossible(pExisting, pInfantry))
+		{
+			*reinterpret_cast<TechnoClass**>(
+				reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = nullptr;
+
+			// Destination too: leaving it set would send the unit on walking to a
+			// building it can never enter, and 0x4D4B5F would keep skipping the
+			// bail we are trying to reach.
+			*reinterpret_cast<TechnoClass**>(
+				reinterpret_cast<BYTE*>(pInfantry) + 0x5A4) = nullptr;
+
+			static std::set<std::pair<const void*, const void*>> lapsed;
+			if (lapsed.emplace((const void*)pInfantry->Type,
+				(const void*)pExisting->Type).second)
+			{
+				Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: no longer enterable "
+					"(occupants %d/%d); target and destination cleared\n",
+					pInfantry->Type->ID, pExisting->Type->ID,
+					pExisting->GetOccupantCount(),
+					pExisting->Type->MaxNumberOccupants);
+			}
+		}
+
 		return 0;
 	}
 
-	// Capacity is re-checked here as well as at admission, because the race is
-	// real: other infantry can fill the last slot during the frames between the
-	// two. Restoring a target we cannot use is worse than doing nothing — the
-	// unit walks over, is refused, and then attacks the building it was sent to
-	// occupy. Leaving the target null simply lets the order lapse.
-	if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
+	// ------------------------------------------------------------------
+	// RESTORE — the order arrived without the target it should have carried.
+	// ------------------------------------------------------------------
+	const auto pBuilding = TakeAdmission(pInfantry);
+	if (!pBuilding)
+		return 0;
+
+	// Single predicate, so "may it enter" cannot drift apart from "did we send
+	// it" the way AdmitsOccupant and the capacity check did.
+	if (!GarrisonStillPossible(pBuilding, pInfantry))
 		return 0;
 
 	*reinterpret_cast<BuildingClass**>(
