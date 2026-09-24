@@ -60,6 +60,8 @@
 
 #include <Ext/TechnoType/Body.h>
 
+#include "GarrisonTrace.h"
+
 namespace
 {
 	// TEMPORARY DIAGNOSTIC. One line per (infantry type, building type, outcome)
@@ -165,6 +167,12 @@ DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
 				callerAddr, pInfantry->Type->ID, pBuilding->Type->ID,
 				(int)pInfantry->Type->Occupier, (int)pInfantry->Type->Assaulter);
 		}
+
+		// Start the lifecycle trace here: this hook sees every caller of
+		// CanBeOccupiedBy and always returns 0, so tracking begins for E1 and
+		// GHOST in the same run as GGI and SNIPE. That built-in control is what
+		// makes "no lines for X" readable at all.
+		GarrisonTrace::Activate(pInfantry, pBuilding);
 	}
 
 	return 0;
@@ -228,6 +236,7 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	if (!TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
 	{
 		Verdict(pInfantry, pBuilding, "REFUSED by matrix");
+		GarrisonTrace::Event(pInfantry, "refused-matrix", pBuilding);
 		return CannotOccupy;
 	}
 
@@ -238,6 +247,7 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	if (pInfantry->Type->Occupier)
 	{
 		Verdict(pInfantry, pBuilding, "admitted, but Occupier=yes -> deferred to Antares");
+		GarrisonTrace::Event(pInfantry, "admitted-occupier", pBuilding);
 		return 0;
 	}
 
@@ -246,6 +256,7 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
 	{
 		Verdict(pInfantry, pBuilding, "REFUSED: building full");
+		GarrisonTrace::Event(pInfantry, "refused-full", pBuilding);
 		return CannotOccupy;
 	}
 
@@ -256,6 +267,7 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	}
 
 	Verdict(pInfantry, pBuilding, "ADMITTED (forced non-Occupier)");
+	GarrisonTrace::Event(pInfantry, "admitted-forced", pBuilding);
 
 	// Record ONLY here — on the path that actually says yes.
 	//
@@ -596,7 +608,10 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 	GET(InfantryClass* const, pInfantry, ESI);
 	GET_STACK(TechnoClass* const, pBuilding, 0x1C);
 
-	return PolicyAdmits(pInfantry, pBuilding, "GarrisonBuilding") ? Proceed : 0;
+	const auto admits = PolicyAdmits(pInfantry, pBuilding, "GarrisonBuilding");
+	GarrisonTrace::Event(pInfantry, admits ? "garrison-gate-pass" : "garrison-gate-deny",
+		abstract_cast<BuildingClass*>(pBuilding));
+	return admits ? Proceed : 0;
 }
 
 // NOTE (2026-09-18): a QueueMission/ForceMission trace lived here. It answered
@@ -1051,6 +1066,8 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 			// unit hunting for a different building the player never chose.
 			*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 0;
 
+			GarrisonTrace::Event(pInfantry, "lapsed", pRouted);
+
 			static std::set<std::pair<const void*, const void*>> lapsed;
 			if (lapsed.emplace((const void*)pInfantry->Type,
 				(const void*)pRouted->Type).second)
@@ -1116,6 +1133,8 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	// Capture order lapses to Guard before the unit arrives.
 	// ------------------------------------------------------------------
 	*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 1;
+
+	GarrisonTrace::Event(pInfantry, "routed", pBuilding);
 
 	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination set + garrison-seek "
 		"flag (+0x691) raised for the engine's own FindGarrisonStructure\n",

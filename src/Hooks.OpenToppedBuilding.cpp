@@ -45,6 +45,8 @@
 
 #include <Ext/TechnoType/Body.h>
 
+#include "GarrisonTrace.h"
+
 namespace
 {
 	bool BuildingIsOpenTopped(BuildingClass* pBuilding)
@@ -98,6 +100,8 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 				const int count = pBuilding->Occupants.Count;
 				const bool present = count > 0
 					&& pBuilding->Occupants.Items[count - 1] == pInfantry;
+				GarrisonTrace::Event(pInfantry, "ENTERED", pBuilding);
+
 				Debug::Log("[PayloadExt-diag] ENTERED %s -> %s: occupants=%d/%d "
 					"appended=%d inLimbo=%d openTopped=%d\n",
 					pInfantry->Type->ID, pBuilding->Type->ID,
@@ -237,6 +241,15 @@ DEFINE_HOOK(0x4580BD, BuildingClass_UnloadOccupants_PayloadOpenTopped, 0x6)
 // ---------------------------------------------------------------------------
 DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
 {
+	// Per-frame sampling for the garrison lifecycle trace. Placed here rather than
+	// on a new hook because this address is the documented benign shared entry
+	// point and we already occupy it; GarrisonTrace::Tick returns immediately for
+	// anything it is not tracking.
+	{
+		GET(TechnoClass* const, pTraced, ECX);
+		GarrisonTrace::Tick(pTraced);
+	}
+
 	GET(TechnoClass* const, pThis, ECX);
 
 	if (!pThis || !pThis->InOpenToppedTransport)
