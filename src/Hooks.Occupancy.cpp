@@ -386,8 +386,60 @@ DEFINE_HOOK(0x4D4B6F, FootClass_MissionCapture_PayloadC4Gate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionCapture.C4")
-		? SetDestinationAndWalk : 0;
+	const auto pTarget = TechnoAt(pInfantry, 0x2B4);
+
+	if (PolicyAdmits(pInfantry, pTarget, "MissionCapture.C4"))
+		return SetDestinationAndWalk;
+
+	// ------------------------------------------------------------------
+	// Refused — and if a Target is still set we must CLEAR it, or the order
+	// neither completes nor lapses.
+	//
+	// 2026-09-21, from Rex seeing a SNIPE shoot the building it was sent to
+	// occupy. Once a Target is present the cancel path cannot end the order:
+	//
+	//   0x4D4B4B  Target non-null        -> continue past the early bail
+	//   0x4D4B6F  admits? NO             -> vanilla checks all fail
+	//   0x4D4BC7  Destination null       -> cancel via [vtable+0x484]
+	//   0x51CC0F  Target non-null AND CurrentMission==8 -> KEEPS Capture
+	//
+	// so it re-enters Mission_Capture next frame with the same state, forever.
+	// That is the "keeps trying" half. The other half is that Target is the
+	// same field an attack reads, so a unit parked on a building it cannot
+	// enter simply opens fire on it — on its owner's own structure.
+	//
+	// Capacity is re-checked at injection, but this race is genuine: the last
+	// slot can be taken while the unit is still walking, which is exactly what
+	// happened to the SNIPE. So handle refusal at arrival too, by clearing the
+	// Target: the cancel then finds nothing to capture and re-derives to Guard,
+	// which is the quiet lapse vanilla would have produced.
+	//
+	// Scoped deliberately: only when the mission really is Capture, only when
+	// there is no Destination, and only for a building that declares a policy.
+	// A force-fire order on your own building is Mission::Attack, not Capture,
+	// so it cannot be caught by this.
+	// ------------------------------------------------------------------
+	if (pTarget && pInfantry->CurrentMission == Mission::Capture
+		&& !TechnoAt(pInfantry, 0x5A4))
+	{
+		if (const auto pBuilding = abstract_cast<BuildingClass*>(pTarget))
+		{
+			const auto pBldExt = pBuilding->Type
+				? TechnoTypeExt::ExtMap.Find(pBuilding->Type) : nullptr;
+
+			if (pBldExt && pBldExt->HasOccupancyPolicy())
+			{
+				*reinterpret_cast<TechnoClass**>(
+					reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = nullptr;
+
+				Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: refused on arrival, "
+					"target cleared so the order ends instead of looping\n",
+					pInfantry->Type->ID, pBuilding->Type->ID);
+			}
+		}
+	}
+
+	return 0;
 }
 
 DEFINE_HOOK(0x51F489, InfantryClass_MissionAttack_PayloadOccupierGate, 0x6)
