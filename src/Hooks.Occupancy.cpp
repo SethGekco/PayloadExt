@@ -103,6 +103,11 @@ namespace
 
 	// True when this building is one we govern, i.e. safe for us to touch the
 	// unit's Target over. Untagged buildings are never interfered with.
+	BYTE FieldByteAt(void* pObj, int offset)
+	{
+		return *(reinterpret_cast<BYTE*>(pObj) + offset);
+	}
+
 	bool IsGovernedBuilding(BuildingClass* pBuilding)
 	{
 		if (!pBuilding || !pBuilding->Type)
@@ -1078,6 +1083,28 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 					pRouted->GetOccupantCount(),
 					pRouted->Type->MaxNumberOccupants);
 			}
+		}
+
+		// STILL POSSIBLE — make sure the engine's garrison-seek is running.
+		//
+		// 2026-09-24, from the lifecycle trace. The control made this obvious:
+		//     E2  mission=Capture dest=CANEWY15 seekGarrison=1  -> survives 219 frames
+		//     GGI mission=Capture dest=GAPILE   seekGarrison=0  -> wiped the next frame
+		// The engine sets +0x691 itself for an Occupier, and that flag is what keeps
+		// the order alive: Mission_Guard's dispatcher (0x4D5070) calls
+		// FindGarrisonStructure every frame while it is set, which re-establishes the
+		// destination. Without it nothing re-establishes anything, so the first
+		// cancel that comes along wins and the mission drops back to Guard.
+		//
+		// GGI never got the flag because of a hole in MY code, not the engine's: the
+		// order dispatcher had already put GAPILE in Destination, so this hook took
+		// the "already routed, leave it alone" path and returned — and the flag was
+		// only ever raised on the other branch, the one that never ran. Raise it
+		// here too. Idempotent, so it is safe to re-assert every frame.
+		if (!FieldByteAt(pInfantry, 0x691))
+		{
+			*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 1;
+			GarrisonTrace::Event(pInfantry, "seek-flag-raised", pRouted);
 		}
 
 		return 0;
