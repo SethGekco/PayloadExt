@@ -919,25 +919,42 @@ DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 // ===========================================================================
 namespace
 {
+	// What the player pointed at, remembered by LOCATION rather than by pointer.
+	//
+	// 2026-09-23: this used to hold a BuildingClass* with a 15-frame expiry, and
+	// it did not work. The admission that identifies the building comes from the
+	// CURSOR query (WhatAction, 0x51E699), which can precede the actual click by
+	// any number of frames, so the record had usually expired by the time the
+	// order arrived — ROUTED never fired and nobody entered. It only appeared to
+	// work earlier because Mission_Attack and Mission_Hunt were re-recording every
+	// frame for those units, refreshing the window by accident.
+	//
+	// The window therefore has to be generous, which rules out keeping a raw
+	// pointer: a building can die or be sold inside it, and dereferencing a freed
+	// one is the failure behind [[aggressivestance-rawptr-map-leak]]. Coordinates
+	// cannot dangle, so store those and re-resolve through the map on use. The
+	// resolved building is then re-validated anyway, which makes a stale record
+	// harmless rather than dangerous.
 	struct PendingGarrison
 	{
-		BuildingClass* Building;
+		CoordStruct Where;
 		int Frame;
 	};
 
-	// Deliberately tiny and short-lived; see POINTER SAFETY above.
 	std::map<InfantryClass*, PendingGarrison> PendingGarrisons;
 
-	// The order lands the frame after admission; a couple of frames of slack is
-	// plenty and keeps any stale pointer from surviving long enough to matter.
-	constexpr int PendingGarrisonWindow = 15;
+	// ~60s at 15fps. Safe to be this loose precisely because the record is a
+	// location, re-resolved and re-checked before anything is done with it.
+	constexpr int PendingGarrisonWindow = 900;
 
 	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding)
 	{
 		if (!pInfantry || !pBuilding)
 			return;
 
-		PendingGarrisons[pInfantry] = { pBuilding, Unsorted::CurrentFrame };
+		// Hovering refreshes this every frame, so the last thing pointed at wins —
+		// which is what the click is about to act on.
+		PendingGarrisons[pInfantry] = { pBuilding->Location, Unsorted::CurrentFrame };
 	}
 
 	BuildingClass* TakeAdmission(InfantryClass* pInfantry)
@@ -959,9 +976,13 @@ namespace
 		if (it == PendingGarrisons.end())
 			return nullptr;
 
-		const auto pBuilding = it->second.Building;
+		const auto where = it->second.Where;
 		PendingGarrisons.erase(it);
-		return pBuilding;
+
+		// Re-resolve rather than trust anything remembered: whatever is on that
+		// cell now is the only thing safe to act on.
+		const auto pCell = MapClass::Instance.TryGetCellAt(where);
+		return pCell ? pCell->GetBuilding() : nullptr;
 	}
 }
 
