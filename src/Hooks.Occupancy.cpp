@@ -970,7 +970,41 @@ namespace
 // prologue). We return 0 in every case: Syringe runs the stolen bytes after us,
 // so the re-read picks up whatever we just stored and the engine carries on as
 // if the order had carried the target all along.
-DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRestoreTarget, 0x6)
+// ---------------------------------------------------------------------------
+// FootClass::Mission_Capture @0x4D4B43 — route the garrison via DESTINATION, not
+// Target. 6 bytes (`mov ecx,[esi+0x2B4]`); ESI = this.
+//
+// 2026-09-23, from Rex: "infantry are displaying the attack target line rather
+// than enter... sometimes they shoot once real quick even when there is space."
+// That is not a timing problem, and no amount of clearing Target later fixes it:
+// a unit with a Target IS attacking, from the instant the order is given. Target
+// (+0x2B4) is the field the attack logic and the order-line renderer both read.
+// Writing it was the wrong mechanism, and the stray shot was the giveaway —
+// writing the raw field also skipped the bookkeeping the engine's own SetTarget
+// does (it resets +0x5E0 and relinks the targeting chain), leaving stale attack
+// state that discharged once before the unit went in.
+//
+// So stop touching Target entirely and set DESTINATION instead — the field that
+// drives movement and nothing else. Mission_Capture tolerates this exactly:
+//
+//   0x4D4B4B  Target null        -> 0x4D4BC7
+//   0x4D4BC7  Destination SET    -> jne 0x4D4C14   (no cancel)
+//   0x4D4C14  Target null        -> house check 0x50B730
+//   0x4D4C24  human-controlled   -> jne 0x4D4C71   -> just returns a delay
+//
+// so the mission stays Capture, the unit walks to the Destination, and
+// UpdatePosition garrisons it on arrival — that path needs a Destination and a
+// mission of Capture, and never reads Target. Vanilla itself passes the building
+// as the destination at 0x4D4BB4, so this is the same shape, just reached
+// without a Target.
+//
+// ⚠ AI CAVEAT: 0x50B730 tests HouseClass+0x1EC/+0x1ED, i.e. human control. For an
+// AI house it returns false and a non-Occupier falls through 0x4D4C3F to
+// 0x4D4C49, which clears the destination and queues Hunt. Not handled here
+// because the AI reaches garrisons through Mission_Hunt instead, which works —
+// but if AI houses are ever wanted on this path, 0x4D4C3F is the gate.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 {
 	GET(TechnoClass* const, pThis, ESI);
 
@@ -978,74 +1012,48 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRestoreTarget, 0x6)
 	if (!pInfantry || !pInfantry->Type)
 		return 0;
 
-	const auto pExisting = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x2B4));
+	const auto pRouted = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x5A4));
 
-	// ------------------------------------------------------------------
-	// CANCEL — a garrison that can no longer happen must not keep its Target.
-	//
-	// This hook is the first thing in Mission_Capture, so it runs EVERY frame the
-	// mission is active. That is deliberate and is what the previous attempt got
-	// wrong: cancelling from the 0x4D4B6F gate only worked before the unit started
-	// walking. Once SetDestination had run, 0x4D4B5F jumped straight past the gate
-	// and the refusal branch became unreachable — so a unit that set off toward a
-	// building which filled up *while it walked* kept its Target forever, and
-	// Target is the field an attack reads. It shot the building it was sent to
-	// occupy, which is exactly what Rex saw with a SNIPE and then with everyone.
-	//
-	// Clearing Target here makes the engine's own bail (0x4D4B4B -> 0x4D4BC7) take
-	// over: with neither Target nor Destination the cancel re-derives to Guard and
-	// the order lapses quietly, which is what vanilla does when a garrison is not
-	// available.
-	//
-	// Scoped to buildings we govern, so an ordinary attack order on any other
-	// structure is untouched.
-	// ------------------------------------------------------------------
-	if (pExisting)
+	// Already walking to a building we govern: cancel if it stopped being
+	// enterable (someone else took the last slot while this unit was crossing
+	// the map — the over-order case), otherwise leave it to finish the journey.
+	if (pRouted && IsGovernedBuilding(pRouted))
 	{
-		if (IsGovernedBuilding(pExisting)
-			&& !GarrisonStillPossible(pExisting, pInfantry))
+		if (!GarrisonStillPossible(pRouted, pInfantry))
 		{
-			*reinterpret_cast<TechnoClass**>(
-				reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = nullptr;
-
-			// Destination too: leaving it set would send the unit on walking to a
-			// building it can never enter, and 0x4D4B5F would keep skipping the
-			// bail we are trying to reach.
-			*reinterpret_cast<TechnoClass**>(
-				reinterpret_cast<BYTE*>(pInfantry) + 0x5A4) = nullptr;
+			// Destination only. With Target never set, dropping the Destination
+			// sends the next frame through 0x4D4BC7 to the engine's own cancel,
+			// which re-derives to Guard: a quiet lapse, no attack, no retry.
+			pInfantry->SetDestination(nullptr, true);
 
 			static std::set<std::pair<const void*, const void*>> lapsed;
 			if (lapsed.emplace((const void*)pInfantry->Type,
-				(const void*)pExisting->Type).second)
+				(const void*)pRouted->Type).second)
 			{
 				Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: no longer enterable "
-					"(occupants %d/%d); target and destination cleared\n",
-					pInfantry->Type->ID, pExisting->Type->ID,
-					pExisting->GetOccupantCount(),
-					pExisting->Type->MaxNumberOccupants);
+					"(occupants %d/%d); destination cleared\n",
+					pInfantry->Type->ID, pRouted->Type->ID,
+					pRouted->GetOccupantCount(),
+					pRouted->Type->MaxNumberOccupants);
 			}
 		}
 
 		return 0;
 	}
 
-	// ------------------------------------------------------------------
-	// RESTORE — the order arrived without the target it should have carried.
-	// ------------------------------------------------------------------
+	// Never override a destination or target the engine set for itself.
+	if (TechnoAt(pInfantry, 0x5A4) || TechnoAt(pInfantry, 0x2B4))
+		return 0;
+
 	const auto pBuilding = TakeAdmission(pInfantry);
-	if (!pBuilding)
+	if (!pBuilding || !GarrisonStillPossible(pBuilding, pInfantry))
 		return 0;
 
-	// Single predicate, so "may it enter" cannot drift apart from "did we send
-	// it" the way AdmitsOccupant and the capacity check did.
-	if (!GarrisonStillPossible(pBuilding, pInfantry))
-		return 0;
+	pInfantry->SetDestination(pBuilding, true);
 
-	*reinterpret_cast<BuildingClass**>(
-		reinterpret_cast<BYTE*>(pInfantry) + 0x2B4) = pBuilding;
-
-	Debug::Log("[PayloadExt-diag] RESTORED %s -> %s: target reinstated for "
-		"Mission::Capture\n", pInfantry->Type->ID, pBuilding->Type->ID);
+	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination set for "
+		"Mission::Capture (no target, so no attack)\n",
+		pInfantry->Type->ID, pBuilding->Type->ID);
 
 	return 0;
 }
