@@ -482,7 +482,7 @@ DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
 	if (admits)
 	{
 		static int approachLines = 0;
-		if (approachLines < 40)
+		if (approachLines < 200)
 		{
 			++approachLines;
 			// MapClass::Instance is a DEFINE_REFERENCE (an object at 0x87F7E8),
@@ -1041,18 +1041,30 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 		return 0;
 	}
 
-	// Never override a destination or target the engine set for itself.
-	if (TechnoAt(pInfantry, 0x5A4) || TechnoAt(pInfantry, 0x2B4))
+	// A real Target means vanilla is driving this; stay out of it.
+	if (TechnoAt(pInfantry, 0x2B4))
 		return 0;
 
+	// NOTE: an existing Destination is deliberately NOT a reason to bail.
+	//
+	// 2026-09-23: it was, and that broke entry completely (ROUTED=0 in the log).
+	// The order dispatcher already sets a Destination at 0x4C747C, but to the
+	// CELL the player clicked — not to the building. UpdatePosition's arrival
+	// test compares the destination against the building itself:
+	//     0x5196C8  call 0x47C520      ; cell->GetBuilding()
+	//     0x5196CD  cmp edi,eax        ; edi = Destination, must BE the building
+	// so a cell destination never matches and the unit walks up and stands there.
+	// The earlier Target-based version only worked because vanilla's own
+	// SetDestination at 0x4D4BB4 overwrote that cell with the building. Doing the
+	// same thing explicitly is the whole job here.
 	const auto pBuilding = TakeAdmission(pInfantry);
 	if (!pBuilding || !GarrisonStillPossible(pBuilding, pInfantry))
 		return 0;
 
 	pInfantry->SetDestination(pBuilding, true);
 
-	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination set for "
-		"Mission::Capture (no target, so no attack)\n",
+	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination retargeted from "
+		"cell to building for Mission::Capture (no target, so no attack)\n",
 		pInfantry->Type->ID, pBuilding->Type->ID);
 
 	return 0;
