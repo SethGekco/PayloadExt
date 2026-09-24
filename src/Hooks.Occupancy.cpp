@@ -1047,6 +1047,10 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 			// which re-derives to Guard: a quiet lapse, no attack, no retry.
 			pInfantry->SetDestination(nullptr, true);
 
+			// Drop the garrison-seek flag as well, or Mission_Guard would send the
+			// unit hunting for a different building the player never chose.
+			*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 0;
+
 			static std::set<std::pair<const void*, const void*>> lapsed;
 			if (lapsed.emplace((const void*)pInfantry->Type,
 				(const void*)pRouted->Type).second)
@@ -1084,8 +1088,37 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 
 	pInfantry->SetDestination(pBuilding, true);
 
-	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination retargeted from "
-		"cell to building for Mission::Capture (no target, so no attack)\n",
+	// ------------------------------------------------------------------
+	// Also hand the job to the ENGINE'S OWN garrison-seek, which is what I should
+	// have used from the start instead of reconstructing an order by hand.
+	//
+	// FootClass+0x691 is a "seek a garrison structure" flag. The dispatcher at
+	// 0x4D5070 — reached from InfantryClass::Mission_Guard (0x51F62F) — tests three
+	// such flags and calls the matching finder:
+	//     0x4D5076  +0x68F -> [vtable+0x340]   tank bunker
+	//     0x4D508A  +0x690 -> [vtable+0x348]   FindBattleBunker
+	//     0x4D50A0  +0x691 -> [vtable+0x34C]   FindGarrisonStructure
+	//
+	// FindGarrisonStructure (0x4DFE00) then does the whole job the vanilla way:
+	// it walks the building array, asks CanBeOccupiedBy about each candidate
+	// (0x4DFE54 — so OUR policy hook decides, and a forced occupant is accepted),
+	// picks the nearest, sets this flag and SetDestination, and clears the flag
+	// again at 0x4DFEEF if nothing suitable is found. Verified by disassembly that
+	// it reads neither Occupier (+0xEB4) nor C4 (+0xEC2), so nothing in it excludes
+	// the types we are trying to admit.
+	//
+	// This is the same route the AI teams use (0x6E9F1C) and the one occupants take
+	// after being evicted, so it is well-trodden rather than novel. Crucially it
+	// never touches Target, so it cannot produce the attack line or the stray shot.
+	//
+	// Set alongside the destination rather than instead of it: the destination
+	// carries the player's actual choice, and the flag is the safety net if the
+	// Capture order lapses to Guard before the unit arrives.
+	// ------------------------------------------------------------------
+	*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = 1;
+
+	Debug::Log("[PayloadExt-diag] ROUTED %s -> %s: destination set + garrison-seek "
+		"flag (+0x691) raised for the engine's own FindGarrisonStructure\n",
 		pInfantry->Type->ID, pBuilding->Type->ID);
 
 	return 0;
