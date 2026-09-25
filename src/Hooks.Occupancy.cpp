@@ -178,6 +178,26 @@ DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
 		// GHOST in the same run as GGI and SNIPE. That built-in control is what
 		// makes "no lines for X" readable at all.
 		GarrisonTrace::Activate(pInfantry, pBuilding);
+
+		// ---------------------------------------------------------------
+		// Record the player's INTENT — and only the player's.
+		//
+		// 2026-09-24. This used to be recorded from the policy hook, on every
+		// admission, which was badly wrong: FindGarrisonStructure (0x4DFE00)
+		// walks the whole building array asking CanBeOccupiedBy about each
+		// candidate (0x4DFE54), so the engine's own search overwrote the record
+		// with whatever it happened to scan last — in practice the nearest
+		// building. That is precisely what Rex saw: units ordered into GAPILL or
+		// NABNKR went to GAPILE instead, could not be called off, and walked in
+		// circles as our re-pinning fought the engine's search frame by frame.
+		//
+		// 0x51E699 is the return address of the CanBeOccupiedBy call inside
+		// InfantryClass::WhatAction — the cursor query, i.e. the one caller that
+		// represents a human pointing at a specific building. Nothing else may
+		// set intent.
+		if (callerAddr == 0x51E699)
+			RememberAdmission(pInfantry, pBuilding);
+		// ---------------------------------------------------------------
 	}
 
 	return 0;
@@ -274,19 +294,10 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	Verdict(pInfantry, pBuilding, "ADMITTED (forced non-Occupier)");
 	GarrisonTrace::Event(pInfantry, "admitted-forced", pBuilding);
 
-	// Record ONLY here — on the path that actually says yes.
+	// NOTE: intent is recorded at the CanBeOccupiedBy entry hook and only for the
+	// cursor query, never here. See the comment there — recording on every
+	// admission let the engine's own building scan clobber the player's choice.
 	//
-	// 2026-09-21: this used to run right after AdmitsOccupant, i.e. BEFORE the
-	// capacity check and before the Occupier early-return. Two bugs fell out of
-	// that, both seen in game:
-	//   * a FULL building was still recorded, so the restore hook reinstated the
-	//     target, the infantry walked over, was refused entry, and — now holding
-	//     the building as its TARGET — opened fire on its owner's own structure;
-	//   * Occupiers were recorded too, though they never need help, and the
-	//     stale target made them pace back and forth in front of a full building.
-	// Admission is the only thing that licenses a restore, so only a completed
-	// admission may record one.
-	RememberAdmission(pInfantry, pBuilding);
 
 	return CanOccupy;
 }
@@ -1067,11 +1078,6 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	if (!pChosen)
 		return 0;
 
-	const auto SetSeek = [pInfantry](BYTE v)
-	{
-		*(reinterpret_cast<BYTE*>(pInfantry) + 0x691) = v;
-	};
-
 	// ---- 1. Already inside: stop driving, and above all STOP SEEKING. --------
 	//
 	// 2026-09-24. The trace shows GGI genuinely entering —
@@ -1083,16 +1089,14 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	// clearing on entry is the fix; forgetting the record stops it recurring.
 	if (pInfantry->InLimbo)
 	{
-		SetSeek(0);
 		ForgetAdmission(pInfantry);
-		GarrisonTrace::Event(pInfantry, "inside-stop-seeking", pChosen);
+		GarrisonTrace::Event(pInfantry, "inside-done", pChosen);
 		return 0;
 	}
 
 	// ---- 2. No longer enterable: lapse quietly. -----------------------------
 	if (!GarrisonStillPossible(pChosen, pInfantry))
 	{
-		SetSeek(0);
 		pInfantry->SetDestination(nullptr, true);
 		ForgetAdmission(pInfantry);
 
@@ -1124,12 +1128,6 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	{
 		pInfantry->SetDestination(pChosen, true);
 		GarrisonTrace::Event(pInfantry, "routed", pChosen);
-	}
-
-	if (!FieldByteAt(pInfantry, 0x691))
-	{
-		SetSeek(1);
-		GarrisonTrace::Event(pInfantry, "seek-flag-raised", pChosen);
 	}
 
 	return 0;
