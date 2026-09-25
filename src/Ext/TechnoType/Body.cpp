@@ -6,9 +6,11 @@
 #include <TechnoClass.h>
 #include <BuildingClass.h>
 #include <InfantryClass.h>
+#include <BuildingTypeClass.h>
 #include <InfantryTypeClass.h>
 #include <WeaponTypeClass.h>
 #include <Utilities/Macro.h>
+#include <Utilities/Debug.h>
 
 #include <Ext/Rules/Body.h>
 
@@ -153,19 +155,37 @@ namespace
 	}
 }
 
-bool TechnoTypeExt::AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInfantry)
+bool TechnoTypeExt::AuthoredOccupier(InfantryTypeClass* pType)
 {
-	if (!pBuilding || !pInfantry || !pBuilding->Type || !pInfantry->Type)
+	if (!pType)
 		return false;
 
-	const auto pBldExt = ExtMap.Find(pBuilding->Type);
-	const auto pInfExt = ExtMap.Find(pInfantry->Type);
+	// If we granted Occupier= ourselves, judge by what the author wrote instead.
+	// Skipping this would make a synthesised type appear to qualify for every
+	// class at every building -- exactly the leak the veto exists to close.
+	if (const auto pExt = ExtMap.Find(pType))
+	{
+		if (pExt->OccupierSynthesised)
+			return pExt->OccupierAuthored;
+	}
+
+	return pType->Occupier;
+}
+
+bool TechnoTypeExt::AdmitsOccupantType(BuildingTypeClass* pBuilding,
+	InfantryTypeClass* pInfantry)
+{
+	if (!pBuilding || !pInfantry)
+		return false;
+
+	const auto pBldExt = ExtMap.Find(pBuilding);
+	const auto pInfExt = ExtMap.Find(pInfantry);
 
 	if (!pBldExt)
 		return false;
 
-	const bool vanillaOccupier = pInfantry->Type->Occupier;
-	const bool canBeOccupied = pBuilding->Type->CanBeOccupied;
+	const bool vanillaOccupier = AuthoredOccupier(pInfantry);
+	const bool canBeOccupied = pBuilding->CanBeOccupied;
 
 	for (int i = 0; i < OccupyClassCount; ++i)
 	{
@@ -176,7 +196,7 @@ bool TechnoTypeExt::AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInf
 			continue;
 
 		// Deny wins over everything else.
-		if (ListContains(gate.Deny, pInfantry->Type))
+		if (ListContains(gate.Deny, pInfantry))
 			continue;
 
 		// Does the infantry qualify as this class on its own? Class 0 is the
@@ -191,11 +211,94 @@ bool TechnoTypeExt::AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInf
 		}
 
 		// ...or the building forces it in regardless.
-		if (qualifies || gate.ForceAll || ListContains(gate.Force, pInfantry->Type))
+		if (qualifies || gate.ForceAll || ListContains(gate.Force, pInfantry))
 			return true;
 	}
 
 	return false;
+}
+
+bool TechnoTypeExt::AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInfantry)
+{
+	if (!pBuilding || !pInfantry)
+		return false;
+
+	return AdmitsOccupantType(pBuilding->Type, pInfantry->Type);
+}
+
+bool TechnoTypeExt::HasSynthesisedOccupier(InfantryTypeClass* pType)
+{
+	if (!pType)
+		return false;
+
+	const auto pExt = ExtMap.Find(pType);
+	return pExt && pExt->OccupierSynthesised;
+}
+
+// Give the engine's own Occupier= to any InfantryType that a governed building
+// admits, so that VANILLA performs the whole garrison sequence.
+//
+// This is the lesson of the 2026-09 rewind in one function. Twenty-odd builds went
+// into supplying the missing steps ourselves -- writing Target, writing
+// Destination, raising the garrison-seek flag -- and every one broke a vanilla
+// behaviour, because each of those fields is owned and cleared by the engine on a
+// schedule we do not control. Setting the ONE flag the engine actually tests, once,
+// before the game starts, makes all of that machinery unnecessary: the order, the
+// walk, the arrival and the entry become plain vanilla paths that already work.
+//
+// The cost is that Occupier= is type-wide, so these types become occupier-capable
+// engine-wide. That scope is clawed back by a read-only veto at CanBeOccupiedBy: a
+// synthesised type is refused by any building whose policy does not admit it, which
+// includes every untagged civilian building. See Hooks.Occupancy.cpp.
+void TechnoTypeExt::SynthesiseOccupiers()
+{
+	int granted = 0;
+
+	for (auto const pInfType : *InfantryTypeClass::Array)
+	{
+		const auto pInfExt = pInfType ? ExtMap.Find(pInfType) : nullptr;
+		if (!pInfExt)
+			continue;
+
+		// Record what the author wrote BEFORE touching anything. Runs once, and
+		// every later admission decision reads this rather than the live field.
+		pInfExt->OccupierAuthored = pInfType->Occupier;
+
+		if (pInfType->Occupier)
+			continue; // already an occupier; nothing to grant
+
+		bool wanted = false;
+
+		for (auto const pBldType : *BuildingTypeClass::Array)
+		{
+			const auto pBldExt = pBldType ? ExtMap.Find(pBldType) : nullptr;
+			if (!pBldExt || !pBldExt->HasOccupancyPolicy())
+				continue;
+
+			if (AdmitsOccupantType(pBldType, pInfType))
+			{
+				wanted = true;
+				break;
+			}
+		}
+
+		if (!wanted)
+			continue;
+
+		pInfType->Occupier = true;
+		pInfExt->OccupierSynthesised = true;
+		++granted;
+
+		Debug::Log("[PayloadExt] Occupier= granted to %s: a building with an "
+			"occupancy policy admits it. Untagged buildings still refuse it.\n",
+			pInfType->ID);
+	}
+
+	if (granted)
+	{
+		Debug::Log("[PayloadExt] synthesised Occupier= on %d infantry type(s); "
+			"vanilla now drives garrison entry for them.\n", granted);
+	}
 }
 
 WeaponStruct* TechnoTypeExt::ExtData::PickGarrisonWeapon(InfantryTypeClass* pOccupantType)

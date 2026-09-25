@@ -111,6 +111,15 @@ public:
 		// BuildingType side, one gate per class.
 		OccupyGate OccupyGates[OccupyClassCount] {};
 
+		// --- Synthesised Occupier (see SynthesiseOccupiers) ------------------
+		// When a governed building admits this InfantryType, we set the engine's
+		// own Occupier= on the TYPE at load so that vanilla drives the entire
+		// garrison sequence. These two fields remember that we did, and what the
+		// author originally wrote, so the permission matrix can keep judging by
+		// the AUTHORED value and never be fooled by our own edit.
+		bool OccupierAuthored { false };
+		bool OccupierSynthesised { false };
+
 		bool UsesRA2Garrison() const { return this->CanOccupyFire_RA2Mode.Get(); }
 
 		// True when this BUILDING type overrides occupancy policy in any way, so
@@ -172,4 +181,27 @@ public:
 	// when:  Allow[C] && (its own Occupier[C] || Force[C]) && !Deny[C]
 	// and admission is true when that holds for ANY class.
 	static bool AdmitsOccupant(BuildingClass* pBuilding, InfantryClass* pInfantry);
+
+	// Same rule, expressed on TYPES, which is all the rule ever needed. The
+	// instance overload forwards to this.
+	static bool AdmitsOccupantType(BuildingTypeClass* pBuilding,
+		InfantryTypeClass* pInfantry);
+
+	// What the author actually wrote for Occupier=, ignoring any value we
+	// synthesised ourselves. Every admission decision must use this, or a
+	// synthesised type would appear to qualify for every class everywhere.
+	static bool AuthoredOccupier(InfantryTypeClass* pType);
+
+	// Run once, after all type data is parsed: give the engine's Occupier= to
+	// every InfantryType that some governed building admits.
+	//
+	// This is the ONLY write outside a decision, and it happens before gameplay,
+	// derived purely from rules data, so it is identical on every machine and
+	// cannot desync. Doing the same thing at cursor time could not be made safe:
+	// Occupier lives on the TYPE, shared by all players, while cursor position is
+	// per-machine and unsynced.
+	static void SynthesiseOccupiers();
+
+	// True when this type only has Occupier= because we granted it.
+	static bool HasSynthesisedOccupier(InfantryTypeClass* pType);
 };

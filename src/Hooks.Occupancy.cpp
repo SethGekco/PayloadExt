@@ -183,9 +183,25 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 
 	const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
 
-	// Not ours -> Antares (or vanilla) decides, untouched.
+	// Not ours -> Antares (or vanilla) decides, untouched...
 	if (!pBldExt || !pBldExt->HasOccupancyPolicy())
 	{
+		// ...with one exception: a type that only has Occupier= because WE granted
+		// it at load must not be admitted here.
+		//
+		// Occupier= is type-wide, so granting it to let a unit into a tagged
+		// building would otherwise also let it into every ordinary garrisonable
+		// building, civilian ones included. This veto claws that scope back, and it
+		// does so by ANSWERING A QUESTION rather than writing anything -- the rule
+		// the 2026-09 rewind established. Authored occupiers are untouched, so E1
+		// and friends behave exactly as they always have.
+		if (TechnoTypeExt::HasSynthesisedOccupier(pInfantry->Type))
+		{
+			Verdict(pInfantry, pBuilding,
+				"synthesised Occupier -> refused by an untagged building");
+			return CannotOccupy;
+		}
+
 		Verdict(pInfantry, pBuilding, "no policy -> deferred to Antares/vanilla");
 		return 0;
 	}
