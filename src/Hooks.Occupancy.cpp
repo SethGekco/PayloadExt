@@ -68,55 +68,6 @@ namespace
 	// recording what CanBeOccupiedBy finally answered and why. This is the one
 	// question none of the earlier logging could answer: our gates said "admits=1"
 	// yet the unit still never entered, and the actual decision was silent.
-	// Defined further down, beside the fix that consumes it: remembers which
-	// building we just admitted this infantry into, so Mission_Capture can be
-	// given the target the order failed to carry.
-	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding);
-
-	// Can this infantry still get into this building RIGHT NOW?
-	//
-	// 2026-09-23: AdmitsOccupant answers "is this type allowed in", which is NOT
-	// the same question and in particular ignores CAPACITY. Using it as the gate
-	// sent units to full buildings: the walk branch ran, SetDestination filled in
-	// a Destination, and from then on 0x4D4B5F jumped past every refusal path, so
-	// the unit stood at a full building holding it as Target -- and Target is the
-	// field an attack reads, so it opened fire. Every decision about whether to
-	// keep pursuing a garrison goes through here now.
-	bool GarrisonStillPossible(BuildingClass* pBuilding, InfantryClass* pInfantry)
-	{
-		if (!pBuilding || !pBuilding->Type || !pInfantry || !pInfantry->Type)
-			return false;
-
-		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
-		if (!pExt || !pExt->HasOccupancyPolicy())
-			return false;
-
-		if (!TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
-			return false;
-
-		// The one that was missing.
-		if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
-			return false;
-
-		return !pInfantry->IsMindControlled();
-	}
-
-	// True when this building is one we govern, i.e. safe for us to touch the
-	// unit's Target over. Untagged buildings are never interfered with.
-	BYTE FieldByteAt(void* pObj, int offset)
-	{
-		return *(reinterpret_cast<BYTE*>(pObj) + offset);
-	}
-
-	bool IsGovernedBuilding(BuildingClass* pBuilding)
-	{
-		if (!pBuilding || !pBuilding->Type)
-			return false;
-
-		const auto pExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
-		return pExt && pExt->HasOccupancyPolicy();
-	}
-
 	void Verdict(InfantryClass* pInfantry, BuildingClass* pBuilding, const char* pWhy)
 	{
 		if (!pInfantry || !pInfantry->Type || !pBuilding || !pBuilding->Type)
@@ -179,34 +130,6 @@ DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
 		// makes "no lines for X" readable at all.
 		GarrisonTrace::Activate(pInfantry, pBuilding);
 
-		// ---------------------------------------------------------------
-		// Record the player's INTENT — and only the player's.
-		//
-		// 2026-09-24. This used to be recorded from the policy hook, on every
-		// admission, which was badly wrong: FindGarrisonStructure (0x4DFE00)
-		// walks the whole building array asking CanBeOccupiedBy about each
-		// candidate (0x4DFE54), so the engine's own search overwrote the record
-		// with whatever it happened to scan last — in practice the nearest
-		// building. That is precisely what Rex saw: units ordered into GAPILL or
-		// NABNKR went to GAPILE instead, could not be called off, and walked in
-		// circles as our re-pinning fought the engine's search frame by frame.
-		//
-		// 0x51E699 is the return address of the CanBeOccupiedBy call inside
-		// InfantryClass::WhatAction — the cursor query, i.e. the one caller that
-		// represents a human pointing at a specific building. Nothing else may
-		// set intent.
-		// ...and only for a building we actually govern.
-		//
-		// 2026-09-24 REGRESSION, mine: this gate was missing, so hovering ANY
-		// garrisonable building recorded it -- including ordinary civilian ones.
-		// GarrisonStillPossible then returns false for an ungoverned building, the
-		// state machine read that as "no longer enterable", and it CANCELLED the
-		// order. Net effect: E1 could no longer garrison civilian buildings at all,
-		// i.e. we broke vanilla. Nothing outside our own tagged buildings may enter
-		// this map.
-		if (callerAddr == 0x51E699 && IsGovernedBuilding(pBuilding))
-			RememberAdmission(pInfantry, pBuilding);
-		// ---------------------------------------------------------------
 	}
 
 	return 0;
@@ -462,19 +385,13 @@ DEFINE_HOOK(0x4D4B6F, FootClass_MissionCapture_PayloadC4Gate, 0x6)
 
 	GET(InfantryClass* const, pInfantry, ESI);
 
-	// GarrisonStillPossible, not PolicyAdmits: a full building must not be walked
-	// to. Cancelling is handled once, at 0x4D4B43, which runs earlier in the same
-	// frame -- so by the time we get here an impossible garrison has already had
-	// its Target cleared and we simply will not see one.
-	const auto pBuilding = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x2B4));
-
-	if (GarrisonStillPossible(pBuilding, pInfantry))
-	{
-		PolicyAdmits(pInfantry, pBuilding, "MissionCapture.C4");
-		return SetDestinationAndWalk;
-	}
-
-	return 0;
+	// Back to a plain admission test. Capacity used to be folded in here because
+	// this hook fed a state machine that WROTE the destination itself; with that
+	// removed, proceeding just hands control to vanilla's own SetDestination at
+	// 0x4D4BB4, and vanilla handles a full building correctly at arrival. Read,
+	// decide, return -- nothing written.
+	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionCapture.C4")
+		? SetDestinationAndWalk : 0;
 }
 
 DEFINE_HOOK(0x51F489, InfantryClass_MissionAttack_PayloadOccupierGate, 0x6)
@@ -689,163 +606,8 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 // infantry garrisoning civilian buildings before Rex ever clicked. The player
 // issues a handful of orders; the AI issues thousands.
 // ===========================================================================
-namespace
-{
-	int PlayerOrderBudget = 60;
-}
 
-// ===========================================================================
-// TEMPORARY DIAGNOSTIC — "the IFV drives off to attack the enemy base the
-// moment it is built. Which DLL did that?"
-//
-// 2026-09-20. Twenty-seven DLLs are injected and roughly a third of them can
-// issue missions, so reading sources to find the guilty one is guesswork. The
-// order itself already carries the answer: whoever assigns the mission leaves
-// their RETURN ADDRESS on the stack. Log it and resolve it to a module
-// in-process, and the culprit names itself in one game.
-//
-// Reading the caller:
-//   * inside gamemd-spawn.exe  -> vanilla / spawner logic, no DLL involved
-//   * inside SomeExt.dll       -> that DLL, at the printed offset
-//   * no module at all         -> a Syringe stub; read the `push <origin>` at
-//                                 stub_base+0x02 to get the hooked address
-//                                 (see syringe-hook-size-resume-boundary).
-//
-// Filter is the type ID prefix "FV", which covers FV plus the TraitExt
-// per-instance variants FV$0 / FV$1, and deliberately does NOT filter by owner
-// — only the Allied human can build one here, and an owner filter would hide
-// the case where something reassigns the unit's house. Change TraceIdPrefix to
-// point this at a different unit.
-//
-// Budget-bounded and observation-only (always returns 0). Delete this block,
-// the two calls below and TraceIdPrefix once the question is answered.
-// ===========================================================================
-namespace
-{
-	constexpr const char* TraceIdPrefix = "FV";
-	int VehicleOrderBudget = 80;
 
-	const char* MissionName(int mission)
-	{
-		switch (mission)
-		{
-		case  0: return "Sleep";      case  1: return "Attack";
-		case  2: return "Move";       case  3: return "QMove";
-		case  4: return "Retreat";    case  5: return "Guard";
-		case  6: return "Sticky";     case  7: return "Enter";
-		case  8: return "Capture";    case 10: return "Harvest";
-		case 11: return "AreaGuard";  case 12: return "Return";
-		case 13: return "Stop";       case 14: return "Ambush";
-		case 15: return "HUNT";       case 16: return "Unload";
-		case 17: return "Sabotage";   case 25: return "Patrol";
-		default: return "?";
-		}
-	}
-
-	// Name the module a code address lives in, and its offset within it.
-	// Static buffer, single-threaded game loop, printed immediately — no
-	// lifetime concerns. Returns "SYRINGE-STUB-or-heap" when the address
-	// belongs to no loaded image, which is itself the answer: a Syringe stub.
-	const char* ModuleOf(DWORD address, DWORD& offset)
-	{
-		offset = 0;
-
-		HMODULE hMod = nullptr;
-		if (!GetModuleHandleExA(
-				GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
-					| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(address), &hMod)
-			|| !hMod)
-			return "SYRINGE-STUB-or-heap";
-
-		offset = address - static_cast<DWORD>(reinterpret_cast<size_t>(hMod));
-
-		static char path[MAX_PATH];
-		if (!GetModuleFileNameA(hMod, path, MAX_PATH))
-			return "<unnamed module>";
-
-		const char* const slash = strrchr(path, '\\');
-		return slash ? slash + 1 : path;
-	}
-
-	void TraceVehicleOrder(void* pThis, DWORD caller, int mission, const char* pHow)
-	{
-		if (VehicleOrderBudget <= 0)
-			return;
-
-		const auto pUnit = abstract_cast<UnitClass*>(
-			static_cast<AbstractClass*>(pThis));
-		if (!pUnit || !pUnit->Type || !pUnit->Owner)
-			return;
-		if (_strnicmp(pUnit->Type->ID, TraceIdPrefix, strlen(TraceIdPrefix)) != 0)
-			return;
-
-		--VehicleOrderBudget;
-
-		DWORD offset = 0;
-		const char* const pModule = ModuleOf(caller, offset);
-
-		Debug::Log("[PayloadExt-diag] IFVORDER %s@%p (%s#%d) <- %s(%d %s) "
-			"from 0x%X [%s+0x%X] was=%d target=%p dest=%p frame=%d\n",
-			pUnit->Type->ID, (void*)pUnit,
-			pUnit->Owner->get_ID(), pUnit->Owner->ArrayIndex,
-			pHow, mission, MissionName(mission), caller,
-			pModule, offset,
-			(int)pUnit->CurrentMission,
-			(void*)pUnit->Target, (void*)pUnit->Destination,
-			Unsorted::CurrentFrame);
-	}
-}
-
-DEFINE_HOOK(0x5B35E0, MissionClass_QueueMission_PayloadPlayerTrace, 0x5)
-{
-	GET(void* const, pThis, ECX);
-	GET_STACK(DWORD const, caller, 0x0);
-	GET_STACK(int const, mission, 0x4);
-
-	TraceVehicleOrder(pThis, caller, mission, "QueueMission");
-
-	if (PlayerOrderBudget > 0)
-	{
-		const auto pInf = abstract_cast<InfantryClass*>(
-			static_cast<AbstractClass*>(pThis));
-		if (pInf && pInf->Type && pInf->Owner && pInf->Owner->IsCurrentPlayer())
-		{
-			--PlayerOrderBudget;
-			Debug::Log("[PayloadExt-diag] PLAYERMISSION %s <- QueueMission(%d) "
-				"from 0x%X (target=%p dest=%p)\n",
-				pInf->Type->ID, mission, caller,
-				(void*)TechnoAt(pInf, 0x2B4), (void*)TechnoAt(pInf, 0x5A4));
-		}
-	}
-
-	return 0;
-}
-
-DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
-{
-	GET(void* const, pThis, ECX);
-	GET_STACK(DWORD const, caller, 0x0);
-	GET_STACK(int const, mission, 0x4);
-
-	TraceVehicleOrder(pThis, caller, mission, "ForceMission");
-
-	if (PlayerOrderBudget > 0)
-	{
-		const auto pInf = abstract_cast<InfantryClass*>(
-			static_cast<AbstractClass*>(pThis));
-		if (pInf && pInf->Type && pInf->Owner && pInf->Owner->IsCurrentPlayer())
-		{
-			--PlayerOrderBudget;
-			Debug::Log("[PayloadExt-diag] PLAYERMISSION %s <- ForceMission(%d) "
-				"from 0x%X (target=%p dest=%p)\n",
-				pInf->Type->ID, mission, caller,
-				(void*)TechnoAt(pInf, 0x2B4), (void*)TechnoAt(pInf, 0x5A4));
-		}
-	}
-
-	return 0;
-}
 
 // ===========================================================================
 // TEMPORARY DIAGNOSTIC — why does the Capture order get reverted?
@@ -879,36 +641,7 @@ DEFINE_HOOK(0x5B2FD0, MissionClass_ForceMission_PayloadPlayerTrace, 0x6)
 //
 // Prologue `mov eax,[esp+8]` + `push ebx` = exactly 5 bytes. At entry ECX =
 // this, [ESP+4] = arg1, [ESP+8] = arg2. Current-player infantry only, bounded.
-// ===========================================================================
-namespace
-{
-	int RetargetBudget = 120;
-}
 
-DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
-{
-	GET(InfantryClass* const, pInf, ECX);
-	GET_STACK(DWORD const, caller, 0x0);
-	GET_STACK(void* const, arg1, 0x4);
-	GET_STACK(void* const, arg2, 0x8);
-
-	if (RetargetBudget > 0 && pInf && pInf->Type
-		&& pInf->Owner && pInf->Owner->IsCurrentPlayer())
-	{
-		--RetargetBudget;
-		const auto pTgt = TechnoAt(pInf, 0x2B4);
-		const auto pDst = TechnoAt(pInf, 0x5A4);
-		const auto pTgtBld = abstract_cast<BuildingClass*>(pTgt);
-		const auto pDstBld = abstract_cast<BuildingClass*>(pDst);
-		Debug::Log("[PayloadExt-diag] RETARGET %s: from 0x%X arg1=%p arg2=%p mission=%d "
-			"target=%p(%s) dest=%p(%s)\n",
-			pInf->Type->ID, caller, arg1, arg2, (int)pInf->CurrentMission,
-			(void*)pTgt, (pTgtBld && pTgtBld->Type) ? pTgtBld->Type->ID : "-",
-			(void*)pDst, (pDstBld && pDstBld->Type) ? pDstBld->Type->ID : "-");
-	}
-
-	return 0;
-}
 
 // NOTE (2026-09-21): a SetTarget trace at 0x51B1F0 lived here and produced ZERO
 // lines -- for GGI *and* for E1, which works. So that address is not the SetTarget
@@ -959,100 +692,6 @@ DEFINE_HOOK(0x51CBA0, InfantryClass_Retarget_PayloadTrace, 0x5)
 // ===========================================================================
 namespace
 {
-	// What the player pointed at, remembered by LOCATION rather than by pointer.
-	//
-	// 2026-09-23: this used to hold a BuildingClass* with a 15-frame expiry, and
-	// it did not work. The admission that identifies the building comes from the
-	// CURSOR query (WhatAction, 0x51E699), which can precede the actual click by
-	// any number of frames, so the record had usually expired by the time the
-	// order arrived — ROUTED never fired and nobody entered. It only appeared to
-	// work earlier because Mission_Attack and Mission_Hunt were re-recording every
-	// frame for those units, refreshing the window by accident.
-	//
-	// The window therefore has to be generous, which rules out keeping a raw
-	// pointer: a building can die or be sold inside it, and dereferencing a freed
-	// one is the failure behind [[aggressivestance-rawptr-map-leak]]. Coordinates
-	// cannot dangle, so store those and re-resolve through the map on use. The
-	// resolved building is then re-validated anyway, which makes a stale record
-	// harmless rather than dangerous.
-	struct PendingGarrison
-	{
-		CoordStruct Where;
-		int Frame;
-		bool Dispatched;   // have we actually issued the move for this episode?
-	};
-
-	std::map<InfantryClass*, PendingGarrison> PendingGarrisons;
-
-	// ~60s at 15fps. Safe to be this loose precisely because the record is a
-	// location, re-resolved and re-checked before anything is done with it.
-	constexpr int PendingGarrisonWindow = 900;
-
-	void RememberAdmission(InfantryClass* pInfantry, BuildingClass* pBuilding)
-	{
-		if (!pInfantry || !pBuilding)
-			return;
-
-		// Hovering refreshes this every frame, so the last thing pointed at wins —
-		// which is what the click is about to act on.
-		// Refreshing an existing record must not clear Dispatched, or the move would
-		// be re-issued every frame the cursor sits over the building.
-		const auto existing = PendingGarrisons.find(pInfantry);
-		const bool dispatched = (existing != PendingGarrisons.end())
-			&& existing->second.Dispatched;
-
-		PendingGarrisons[pInfantry] =
-			{ pBuilding->Location, Unsorted::CurrentFrame, dispatched };
-	}
-
-	bool WasDispatched(InfantryClass* pInfantry)
-	{
-		const auto it = PendingGarrisons.find(pInfantry);
-		return it != PendingGarrisons.end() && it->second.Dispatched;
-	}
-
-	void MarkDispatched(InfantryClass* pInfantry)
-	{
-		const auto it = PendingGarrisons.find(pInfantry);
-		if (it != PendingGarrisons.end())
-			it->second.Dispatched = true;
-	}
-
-	void ForgetAdmission(InfantryClass* pInfantry)
-	{
-		PendingGarrisons.erase(pInfantry);
-	}
-
-	// Resolve WITHOUT consuming. The record has to survive every frame of the
-	// journey now, because it is the only thing that pins the unit to the building
-	// the player actually chose; consuming it on first use is what let the engine's
-	// own search wander off to other structures.
-	BuildingClass* PeekAdmission(InfantryClass* pInfantry)
-	{
-		if (PendingGarrisons.empty())
-			return nullptr;
-
-		const int now = Unsorted::CurrentFrame;
-
-		for (auto it = PendingGarrisons.begin(); it != PendingGarrisons.end(); )
-		{
-			if (now - it->second.Frame > PendingGarrisonWindow)
-				it = PendingGarrisons.erase(it);
-			else
-				++it;
-		}
-
-		const auto it = PendingGarrisons.find(pInfantry);
-		if (it == PendingGarrisons.end())
-			return nullptr;
-
-		const auto where = it->second.Where;
-
-		// Re-resolve rather than trust anything remembered: whatever is on that
-		// cell now is the only thing safe to act on.
-		const auto pCell = MapClass::Instance.TryGetCellAt(where);
-		return pCell ? pCell->GetBuilding() : nullptr;
-	}
 }
 
 // FootClass::Mission_Capture @0x4D4B43 — `mov ecx,[esi+0x2B4]`, exactly 6 bytes,
@@ -1060,128 +699,38 @@ namespace
 // prologue). We return 0 in every case: Syringe runs the stolen bytes after us,
 // so the re-read picks up whatever we just stored and the engine carries on as
 // if the order had carried the target all along.
-// ---------------------------------------------------------------------------
-// FootClass::Mission_Capture @0x4D4B43 — route the garrison via DESTINATION, not
-// Target. 6 bytes (`mov ecx,[esi+0x2B4]`); ESI = this.
+// ===========================================================================
+// REMOVED 2026-09-24 — the forced-entry state machine that used to live here.
 //
-// 2026-09-23, from Rex: "infantry are displaying the attack target line rather
-// than enter... sometimes they shoot once real quick even when there is space."
-// That is not a timing problem, and no amount of clearing Target later fixes it:
-// a unit with a Target IS attacking, from the instant the order is given. Target
-// (+0x2B4) is the field the attack logic and the order-line renderer both read.
-// Writing it was the wrong mechanism, and the stray shot was the giveaway —
-// writing the raw field also skipped the bookkeeping the engine's own SetTarget
-// does (it resets +0x5E0 and relinks the targeting chain), leaving stale attack
-// state that discharged once before the unit went in.
+// It wrote unit state: Target (+0x2B4), Destination (+0x5A4) and the garrison-seek
+// flag (+0x691). Over a dozen builds it broke vanilla three separate ways:
 //
-// So stop touching Target entirely and set DESTINATION instead — the field that
-// drives movement and nothing else. Mission_Capture tolerates this exactly:
+//   * units opened fire on the building they had been sent to occupy, because
+//     Target is also the attack field;
+//   * E1 stopped being able to garrison civilian buildings at all, because a
+//     record naming an ungoverned building made the machine cancel the order;
+//   * E1 began ignoring orders and entering whichever building was NEAREST,
+//     because FindGarrisonStructure picks the nearest and our per-frame pin
+//     fought it.
 //
-//   0x4D4B4B  Target null        -> 0x4D4BC7
-//   0x4D4BC7  Destination SET    -> jne 0x4D4C14   (no cancel)
-//   0x4D4C14  Target null        -> house check 0x50B730
-//   0x4D4C24  human-controlled   -> jne 0x4D4C71   -> just returns a delay
+// Each fix produced the next regression, which is the signature of an approach
+// that is wrong rather than incomplete. Rex called the rewind and he was right.
 //
-// so the mission stays Capture, the unit walks to the Destination, and
-// UpdatePosition garrisons it on arrival — that path needs a Destination and a
-// mission of Capture, and never reads Target. Vanilla itself passes the building
-// as the destination at 0x4D4BB4, so this is the same shape, just reached
-// without a Target.
+// THE RULE THIS LEAVES BEHIND: hooks in this file may ANSWER QUESTIONS — return a
+// branch target, report a verdict — but must not WRITE unit state. Everything that
+// has ever worked here (the permission matrix, RA2-mode garrison, open-topped
+// buildings, the per-entry modifiers) only ever decided and reported. Everything
+// that broke vanilla wrote a field the engine also owned.
 //
-// ⚠ AI CAVEAT: 0x50B730 tests HouseClass+0x1EC/+0x1ED, i.e. human control. For an
-// AI house it returns false and a non-Occupier falls through 0x4D4C3F to
-// 0x4D4C49, which clears the destination and queues Hunt. Not handled here
-// because the AI reaches garrisons through Mission_Hunt instead, which works —
-// but if AI houses are ever wanted on this path, 0x4D4C3F is the gate.
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
-{
-	GET(TechnoClass* const, pThis, ESI);
+// Forced entry for a non-Occupier via a PLAYER order therefore remains unsolved.
+// What is known, for whoever picks it up:
+//   * admission already works — CanBeOccupiedBy says yes for a forced occupant;
+//   * the AI reaches it fine through Mission_Hunt, which has no C4 gate;
+//   * the player path dies because vanilla's Mission_Capture bails for a
+//     non-Occupier before it ever calls SetDestination, and nothing else does;
+//   * anything that supplies that call from outside has to win a fight with
+//     FindGarrisonStructure every frame, and loses.
+// The next attempt should look for a way to make VANILLA make that call, not to
+// make it on vanilla's behalf.
+// ===========================================================================
 
-	const auto pInfantry = abstract_cast<InfantryClass*>(pThis);
-	if (!pInfantry || !pInfantry->Type)
-		return 0;
-
-	// The building the PLAYER chose, resolved fresh from its cell each frame and
-	// deliberately not consumed: it is what pins the unit to that one structure.
-	const auto pChosen = PeekAdmission(pInfantry);
-	if (!pChosen)
-		return 0;
-
-	// Second line of defence for the same regression. If the record somehow names
-	// a building we do not govern, drop it and take our hands off completely --
-	// vanilla owns that order, and cancelling it is the last thing we should do.
-	if (!IsGovernedBuilding(pChosen))
-	{
-		ForgetAdmission(pInfantry);
-		return 0;
-	}
-
-	// ---- 1. Already inside: stop driving, and above all STOP SEEKING. --------
-	//
-	// 2026-09-24. The trace shows GGI genuinely entering —
-	//     ENTERED GGI -> GAPILE: occupants=2/4 appended=1 inLimbo=1
-	// — and then walking straight back out. That was me. GarrisonBuilding clears
-	// both seek flags on entry (0x5229F4/0x5229FA); my hook re-raised +0x691 the
-	// very next frame, Mission_Guard's dispatcher called FindGarrisonStructure
-	// again, and the unit left to go and find a building. Matching the engine and
-	// clearing on entry is the fix; forgetting the record stops it recurring.
-	if (pInfantry->InLimbo)
-	{
-		ForgetAdmission(pInfantry);
-		GarrisonTrace::Event(pInfantry, "inside-done", pChosen);
-		return 0;
-	}
-
-	// ---- 2. No longer enterable: lapse quietly. -----------------------------
-	if (!GarrisonStillPossible(pChosen, pInfantry))
-	{
-		pInfantry->SetDestination(nullptr, true);
-		ForgetAdmission(pInfantry);
-
-		static std::set<std::pair<const void*, const void*>> lapsed;
-		if (lapsed.emplace((const void*)pInfantry->Type,
-			(const void*)pChosen->Type).second)
-		{
-			Debug::Log("[PayloadExt-diag] LAPSED %s -> %s: no longer enterable "
-				"(occupants %d/%d); destination and seek cleared\n",
-				pInfantry->Type->ID, pChosen->Type->ID,
-				pChosen->GetOccupantCount(), pChosen->Type->MaxNumberOccupants);
-		}
-
-		GarrisonTrace::Event(pInfantry, "lapsed", pChosen);
-		return 0;
-	}
-
-	// ---- 3. En route: pin to the chosen building and keep the seek alive. ----
-	//
-	// Pinning matters as much as seeking. FindGarrisonStructure picks the NEAREST
-	// valid structure, not the one that was clicked, so leaving it unsupervised is
-	// what made units "randomly try another structure" when the intended one
-	// filled up or was sold. Re-asserting the destination every frame keeps the
-	// engine's search on the player's choice, and step 2 is the only thing allowed
-	// to give up.
-	const auto pDest = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x5A4));
-
-	// Dispatch the move ONCE, then only re-pin if something redirects it.
-	//
-	// 2026-09-24: "pin only when the destination differs" looked conservative and
-	// was the reason GGI stood still. The trace showed it holding
-	// mission=Capture dest=GAPILE for its whole life, onDestCell never reaching 1
-	// and no routed event ever logged: the engine had filled in the Destination
-	// FIELD but never dispatched the move, because vanilla's Mission_Capture bails
-	// for a non-Occupier before it reaches SetDestination. Since the field already
-	// matched, my condition meant nobody ever called SetDestination and nobody ever
-	// told the unit to walk. E1 moves precisely because vanilla makes that call.
-	//
-	// So the first frame we manage a unit always dispatches. Tracked in the record
-	// rather than re-issued every frame, which would restart pathing continuously.
-	if (!WasDispatched(pInfantry) || pDest != pChosen)
-	{
-		pInfantry->SetDestination(pChosen, true);
-		MarkDispatched(pInfantry);
-		GarrisonTrace::Event(pInfantry, "routed", pChosen);
-	}
-
-	return 0;
-}
