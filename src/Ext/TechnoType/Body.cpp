@@ -254,7 +254,9 @@ void TechnoTypeExt::SynthesiseOccupiers()
 {
 	int granted = 0;
 
-	for (auto const pInfType : *InfantryTypeClass::Array)
+	// Array is a DEFINE_REFERENCE object, not a pointer -- the same trap as
+	// MapClass::Instance. No dereference.
+	for (auto const pInfType : InfantryTypeClass::Array)
 	{
 		const auto pInfExt = pInfType ? ExtMap.Find(pInfType) : nullptr;
 		if (!pInfExt)
@@ -269,7 +271,7 @@ void TechnoTypeExt::SynthesiseOccupiers()
 
 		bool wanted = false;
 
-		for (auto const pBldType : *BuildingTypeClass::Array)
+		for (auto const pBldType : BuildingTypeClass::Array)
 		{
 			const auto pBldExt = pBldType ? ExtMap.Find(pBldType) : nullptr;
 			if (!pBldExt || !pBldExt->HasOccupancyPolicy())
