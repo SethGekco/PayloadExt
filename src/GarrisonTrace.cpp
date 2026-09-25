@@ -58,9 +58,37 @@ namespace
 		int Lines;
 		bool HasPrev;
 		Sample Prev;
+		// RETIRED, not erased. Activate() is called every frame for any unit
+		// near a governed building, so ERASING an exhausted unit handed it
+		// straight back to Activate() with a fresh budget and a fresh
+		// TRACK-START. That loop produced 117,746 TRACK-STARTs and an 848 MB
+		// debug.log in one session: the per-unit budget was never a limit,
+		// only a period. A retired entry must therefore stay in the map.
+		bool Done;
 	};
 
 	std::map<InfantryClass*, Tracked> Units;
+
+	// Absolute backstop, deliberately generous. This is NOT the global budget
+	// the header warns about - that one was small enough to starve the unit
+	// under test. This only exists so no future bug in the retirement logic can
+	// cost another 848 MB; a normal diagnostic run never approaches it.
+	constexpr int LinesTotalMax = 20000;
+	int LinesTotal = 0;
+	bool WarnedTotal = false;
+
+	bool BudgetExhausted()
+	{
+		if (LinesTotal < LinesTotalMax)
+			return false;
+		if (!WarnedTotal)
+		{
+			WarnedTotal = true;
+			Debug::Log("[PLXTRACE] total line budget (%d) reached - tracing off for "
+				"the rest of this run\n", LinesTotalMax);
+		}
+		return true;
+	}
 
 	// Per unit, so a common type cannot starve a rare one.
 	constexpr int LinesPerUnit = 45;
@@ -123,6 +151,7 @@ namespace
 	void Emit(InfantryClass* pInfantry, Tracked& t, const Sample& s, const char* pWhy)
 	{
 		++t.Lines;
+		++LinesTotal;
 		Debug::Log("[PLXTRACE] f%d %s@%p %s: mission=%s queued=%s target=%s dest=%s "
 			"seekGarrison=%d seekBunker=%d limbo=%d onDestCell=%d\n",
 			Unsorted::CurrentFrame - t.StartFrame,
@@ -150,7 +179,11 @@ namespace GarrisonTrace
 		if (it != Units.end())
 			return; // already tracked; do not reset the clock or the budget
 
-		Units[pInfantry] = Tracked { Unsorted::CurrentFrame, 0, false, Sample {} };
+		if (BudgetExhausted())
+			return;
+
+		Units[pInfantry] = Tracked { Unsorted::CurrentFrame, 0, false, Sample {}, false };
+		++LinesTotal;
 
 		Debug::Log("[PLXTRACE] f0 %s@%p TRACK-START: asked about %s\n",
 			pInfantry->Type->ID, (void*)pInfantry, pBuilding->Type->ID);
@@ -170,12 +203,17 @@ namespace GarrisonTrace
 			return;
 
 		auto& t = it->second;
+		if (t.Done)
+			return;
 
-		// Forget rather than grow: an untracked unit costs one map lookup.
+		// Retire in place. Erasing here let Activate() re-add the same unit next
+		// frame with a fresh budget, so this was an endless cycle rather than a
+		// cap - see the note on Tracked::Done.
 		if (Unsorted::CurrentFrame - t.StartFrame > TrackFrames
-			|| t.Lines >= LinesPerUnit)
+			|| t.Lines >= LinesPerUnit
+			|| BudgetExhausted())
 		{
-			Units.erase(it);
+			t.Done = true;
 			return;
 		}
 
@@ -200,7 +238,7 @@ namespace GarrisonTrace
 			return;
 
 		auto& t = it->second;
-		if (t.Lines >= LinesPerUnit)
+		if (t.Done || t.Lines >= LinesPerUnit || BudgetExhausted())
 			return;
 
 		const auto s = Read(pInfantry);
@@ -211,6 +249,7 @@ namespace GarrisonTrace
 		// hook RAN is as informative as the state it ran with -- that distinction
 		// is what several earlier rounds could not make.
 		++t.Lines;
+		++LinesTotal;
 		Debug::Log("[PLXTRACE] f%d %s@%p EVENT %s(%s): mission=%s queued=%s "
 			"target=%s dest=%s seekGarrison=%d limbo=%d onDestCell=%d\n",
 			Unsorted::CurrentFrame - t.StartFrame,
