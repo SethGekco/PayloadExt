@@ -195,7 +195,16 @@ DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
 		// InfantryClass::WhatAction — the cursor query, i.e. the one caller that
 		// represents a human pointing at a specific building. Nothing else may
 		// set intent.
-		if (callerAddr == 0x51E699)
+		// ...and only for a building we actually govern.
+		//
+		// 2026-09-24 REGRESSION, mine: this gate was missing, so hovering ANY
+		// garrisonable building recorded it -- including ordinary civilian ones.
+		// GarrisonStillPossible then returns false for an ungoverned building, the
+		// state machine read that as "no longer enterable", and it CANCELLED the
+		// order. Net effect: E1 could no longer garrison civilian buildings at all,
+		// i.e. we broke vanilla. Nothing outside our own tagged buildings may enter
+		// this map.
+		if (callerAddr == 0x51E699 && IsGovernedBuilding(pBuilding))
 			RememberAdmission(pInfantry, pBuilding);
 		// ---------------------------------------------------------------
 	}
@@ -970,6 +979,7 @@ namespace
 	{
 		CoordStruct Where;
 		int Frame;
+		bool Dispatched;   // have we actually issued the move for this episode?
 	};
 
 	std::map<InfantryClass*, PendingGarrison> PendingGarrisons;
@@ -985,7 +995,27 @@ namespace
 
 		// Hovering refreshes this every frame, so the last thing pointed at wins —
 		// which is what the click is about to act on.
-		PendingGarrisons[pInfantry] = { pBuilding->Location, Unsorted::CurrentFrame };
+		// Refreshing an existing record must not clear Dispatched, or the move would
+		// be re-issued every frame the cursor sits over the building.
+		const auto existing = PendingGarrisons.find(pInfantry);
+		const bool dispatched = (existing != PendingGarrisons.end())
+			&& existing->second.Dispatched;
+
+		PendingGarrisons[pInfantry] =
+			{ pBuilding->Location, Unsorted::CurrentFrame, dispatched };
+	}
+
+	bool WasDispatched(InfantryClass* pInfantry)
+	{
+		const auto it = PendingGarrisons.find(pInfantry);
+		return it != PendingGarrisons.end() && it->second.Dispatched;
+	}
+
+	void MarkDispatched(InfantryClass* pInfantry)
+	{
+		const auto it = PendingGarrisons.find(pInfantry);
+		if (it != PendingGarrisons.end())
+			it->second.Dispatched = true;
 	}
 
 	void ForgetAdmission(InfantryClass* pInfantry)
@@ -1078,6 +1108,15 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	if (!pChosen)
 		return 0;
 
+	// Second line of defence for the same regression. If the record somehow names
+	// a building we do not govern, drop it and take our hands off completely --
+	// vanilla owns that order, and cancelling it is the last thing we should do.
+	if (!IsGovernedBuilding(pChosen))
+	{
+		ForgetAdmission(pInfantry);
+		return 0;
+	}
+
 	// ---- 1. Already inside: stop driving, and above all STOP SEEKING. --------
 	//
 	// 2026-09-24. The trace shows GGI genuinely entering —
@@ -1124,9 +1163,23 @@ DEFINE_HOOK(0x4D4B43, FootClass_MissionCapture_PayloadRouteToBuilding, 0x6)
 	// to give up.
 	const auto pDest = abstract_cast<BuildingClass*>(TechnoAt(pInfantry, 0x5A4));
 
-	if (pDest != pChosen)
+	// Dispatch the move ONCE, then only re-pin if something redirects it.
+	//
+	// 2026-09-24: "pin only when the destination differs" looked conservative and
+	// was the reason GGI stood still. The trace showed it holding
+	// mission=Capture dest=GAPILE for its whole life, onDestCell never reaching 1
+	// and no routed event ever logged: the engine had filled in the Destination
+	// FIELD but never dispatched the move, because vanilla's Mission_Capture bails
+	// for a non-Occupier before it reaches SetDestination. Since the field already
+	// matched, my condition meant nobody ever called SetDestination and nobody ever
+	// told the unit to walk. E1 moves precisely because vanilla makes that call.
+	//
+	// So the first frame we manage a unit always dispatches. Tracked in the record
+	// rather than re-issued every frame, which would restart pathing continuously.
+	if (!WasDispatched(pInfantry) || pDest != pChosen)
 	{
 		pInfantry->SetDestination(pChosen, true);
+		MarkDispatched(pInfantry);
 		GarrisonTrace::Event(pInfantry, "routed", pChosen);
 	}
 
