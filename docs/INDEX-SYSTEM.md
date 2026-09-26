@@ -143,3 +143,54 @@ and the Phobos turret-draw rewrite conflict from TURRETS.md §3 applies here too
 - 📋 **Designed, not built:** everything in §3–§5.
 - ❓ **Needs Rex:** the `Index` vs `Profile` naming call (§3), and confirmation
   that invisible-to-enemy is cosmetic-only or needs a separate logical tag (§4).
+
+---
+
+## IMPLEMENTED: OpenTopped profile by veterancy
+
+The first selector shipped from this design, and a useful precedent for the rest.
+
+```ini
+[BFRT]
+OpenTopped=yes
+OpenTopped.Profile=BFRTBase          ; base / rookie  (unsuffixed = index 0)
+OpenTopped.Profile.Veteran=BFRTVet
+OpenTopped.Profile.Elite=BFRTElite
+OpenTopped.VeterancySource=transport ; transport (default) | passenger
+
+[BFRTElite]
+DamageMultiplier=1.5                 ; multiplies a shot fired OUT
+RangeBonus=2                         ; cells, may be negative
+```
+
+**Naming.** Follows the binding rule — `Index` = integer, `Profile` = named
+section — in the general form `<Domain>.Profile[.<Selector>]=<Section>`. Keys
+inside a profile section are plain (`DamageMultiplier`, not
+`OpenTopped.DamageMultiplier`), because the section is PayloadExt's alone and
+cannot collide with Phobos's identically-purposed per-TYPE tags.
+
+**Fallback is downward:** elite → veteran → rookie → nothing. Declaring only
+`.Elite` therefore affects elites and leaves everyone else at vanilla, which is
+what one line of authoring should do.
+
+**Scope, deliberately narrow.** Phobos already provides the per-type VALUES
+(`OpenTopped.DamageMultiplier`, `OpenTopped.RangeBonus`). This adds only the
+selection by rank, and applies at convergence points *after* vanilla's and
+Phobos's own modifiers, so the two compose. Check what a co-loaded framework
+already supplies before implementing a selector's payload.
+
+**Whose rank?** The profile always comes from the TRANSPORT's type, since it
+describes that transport's firing ports; only the rank that selects it is
+configurable. `transport` is the default because "a veteran Battle Fortress makes
+its passengers shoot better" is a property of the vehicle.
+
+⚠ **For an OpenTopped BUILDING, use `VeterancySource=passenger`.** A building
+never gains rank of its own, so the transport reading would pin it to rookie
+forever. This is the kind of asymmetry worth stating in the tag docs rather than
+leaving an author to discover.
+
+**Implementation note for the next selector.** No new hook addresses were needed:
+it rides the two convergence points this DLL already owns — `0x6FE460` (damage)
+and `0x6F72EF` (range) — and each only adjusts a register. That read-only shape is
+why it worked first try, and is the shape every remaining selector in this
+document should aim for.
