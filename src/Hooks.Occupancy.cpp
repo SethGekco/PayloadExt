@@ -40,100 +40,13 @@
 
 #include <BuildingClass.h>
 #include <BuildingTypeClass.h>
-#include <CellClass.h>
-#include <HouseClass.h>
 #include <InfantryClass.h>
 #include <InfantryTypeClass.h>
-#include <MapClass.h>
-#include <UnitClass.h>
-#include <UnitTypeClass.h>
-#include <Unsorted.h>
 
 #include <Utilities/Macro.h>
 #include <Utilities/Debug.h>
 
-#include <cstring>
-#include <map>
-#include <set>
-#include <tuple>
-#include <utility>
-
 #include <Ext/TechnoType/Body.h>
-
-#include "GarrisonTrace.h"
-
-namespace
-{
-	// TEMPORARY DIAGNOSTIC. One line per (infantry type, building type, outcome)
-	// recording what CanBeOccupiedBy finally answered and why. This is the one
-	// question none of the earlier logging could answer: our gates said "admits=1"
-	// yet the unit still never entered, and the actual decision was silent.
-	void Verdict(InfantryClass* pInfantry, BuildingClass* pBuilding, const char* pWhy)
-	{
-		if (!pInfantry || !pInfantry->Type || !pBuilding || !pBuilding->Type)
-			return;
-
-		static std::set<std::tuple<const void*, const void*, const void*>> reported;
-		if (reported.emplace((const void*)pInfantry->Type,
-			(const void*)pBuilding->Type, (const void*)pWhy).second)
-		{
-			Debug::Log("[PayloadExt-diag] VERDICT %s -> %s: %s\n",
-				pInfantry->Type->ID, pBuilding->Type->ID, pWhy);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Diagnostic only — BuildingClass::CanBeOccupiedBy @0x457CE0, the ENTRY.
-//
-// All nine call sites of this function converge here, so logging the caller's
-// return address says exactly which code path is asking about a given pairing —
-// and, by its absence, which paths never ask at all. That distinction is what
-// the previous rounds kept guessing at.
-//
-// Prologue `sub esp,0xC / push esi / push edi` = exactly 5 bytes, so the steal
-// lands on an instruction boundary. At entry ESP is untouched, so [ESP] is the
-// return address and [ESP+4] the infantry argument — confirmed by 0x457CE5
-// reading that argument as [ESP+0x18] after 0x14 bytes of prologue. Always
-// returns 0; this only observes.
-//
-// Callers, for decoding the logged address:
-//   0x4DFD89 / 0x4DFE54  FootClass, garrison-target selection
-//   0x5196D4             InfantryClass::UpdatePosition
-//   0x51E694             InfantryClass::WhatAction   (the CURSOR)
-//   0x51F4A4             InfantryClass::Mission_Attack
-//   0x51F591             InfantryClass::Mission_Hunt
-//   0x6F832F / 0x6F844E  TechnoClass threat evaluation
-//   0x6FA3CE             TechnoClass::AI
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x457CE0, BuildingClass_CanBeOccupiedBy_PayloadTrace, 0x5)
-{
-	GET(BuildingClass* const, pBuilding, ECX);
-	GET_STACK(DWORD const, callerAddr, 0x0);
-	GET_STACK(InfantryClass* const, pInfantry, 0x4);
-
-	if (pBuilding && pBuilding->Type && pInfantry && pInfantry->Type)
-	{
-		static std::set<std::tuple<DWORD, const void*, const void*>> reported;
-		if (reported.emplace(callerAddr, (const void*)pInfantry->Type,
-			(const void*)pBuilding->Type).second)
-		{
-			Debug::Log("[PayloadExt-diag] ASKED from 0x%X: %s -> %s "
-				"(Occupier=%d Assaulter=%d)\n",
-				callerAddr, pInfantry->Type->ID, pBuilding->Type->ID,
-				(int)pInfantry->Type->Occupier, (int)pInfantry->Type->Assaulter);
-		}
-
-		// Start the lifecycle trace here: this hook sees every caller of
-		// CanBeOccupiedBy and always returns 0, so tracking begins for E1 and
-		// GHOST in the same run as GGI and SNIPE. That built-in control is what
-		// makes "no lines for X" readable at all.
-		GarrisonTrace::Activate(pInfantry, pBuilding);
-
-	}
-
-	return 0;
-}
 
 // ---------------------------------------------------------------------------
 // Step 1 — get non-Occupier infantry as far as the decision point.
@@ -197,19 +110,14 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 		// and friends behave exactly as they always have.
 		if (TechnoTypeExt::HasSynthesisedOccupier(pInfantry->Type))
 		{
-			Verdict(pInfantry, pBuilding,
-				"synthesised Occupier -> refused by an untagged building");
 			return CannotOccupy;
 		}
 
-		Verdict(pInfantry, pBuilding, "no policy -> deferred to Antares/vanilla");
 		return 0;
 	}
 
 	if (!TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry))
 	{
-		Verdict(pInfantry, pBuilding, "REFUSED by matrix");
-		GarrisonTrace::Event(pInfantry, "refused-matrix", pBuilding);
 		return CannotOccupy;
 	}
 
@@ -219,8 +127,6 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	// non-Occupier has to bypass, because Antares would reject it outright.
 	if (pInfantry->Type->Occupier)
 	{
-		Verdict(pInfantry, pBuilding, "admitted, but Occupier=yes -> deferred to Antares");
-		GarrisonTrace::Event(pInfantry, "admitted-occupier", pBuilding);
 		return 0;
 	}
 
@@ -228,253 +134,20 @@ DEFINE_HOOK(0x457D58, BuildingClass_CanBeOccupiedBy_PayloadPolicy, 0x6)
 	// the two that actually matter for a forced occupant.
 	if (pBuilding->GetOccupantCount() >= pBuilding->Type->MaxNumberOccupants)
 	{
-		Verdict(pInfantry, pBuilding, "REFUSED: building full");
-		GarrisonTrace::Event(pInfantry, "refused-full", pBuilding);
 		return CannotOccupy;
 	}
 
 	if (pInfantry->IsMindControlled())
 	{
-		Verdict(pInfantry, pBuilding, "REFUSED: mind-controlled");
 		return CannotOccupy;
 	}
 
-	Verdict(pInfantry, pBuilding, "ADMITTED (forced non-Occupier)");
-	GarrisonTrace::Event(pInfantry, "admitted-forced", pBuilding);
-
-	// NOTE: intent is recorded at the CanBeOccupiedBy entry hook and only for the
-	// cursor query, never here. See the comment there — recording on every
-	// admission let the engine's own building scan clobber the player's choice.
 	//
 
 	return CanOccupy;
 }
 
-// ===========================================================================
-// The OTHER Occupier gates — the ones that short-circuit before
-// BuildingClass::CanBeOccupiedBy ever runs.
-//
-// 2026-09-08: GGI/SNIPE showed the "enter" cursor on an RA2-mode building and
-// the order was accepted, but they never walked. Cause: `Occupier` is tested in
-// SEVERAL places, and most of them bail *before* calling CanBeOccupiedBy
-// (0x457CE0), which is where our policy lives. Found them all by searching the
-// binary for reads of InfantryTypeClass+0xEB4:
-//
-//     mov cl,[Type+0xEB5]   ; Assaulter
-//     jne proceed
-//     mov cl,[Type+0xEB4]   ; Occupier
-//     je  bail              ; <-- neither -> never reaches CanBeOccupiedBy
-//   proceed:
-//     ...
-//     call 0x457CE0         ; CanBeOccupiedBy
-//
-// So each hook below only has to get PAST the short-circuit; the real decision
-// still happens in CanBeOccupiedBy, where BuildingClass_CanBeOccupiedBy_
-// PayloadPolicy applies the full matrix. The exception is GarrisonBuilding,
-// which never calls CanBeOccupiedBy, so it decides there.
-//
-// Verified offsets: Occupier = InfantryTypeClass+0xEB4, Assaulter = +0xEB5.
-// ===========================================================================
 
-namespace
-{
-	// Would our per-building policy admit this infantry? False for any building
-	// that declares no policy, so untagged buildings behave exactly as vanilla.
-	bool PolicyAdmits(InfantryClass* pInfantry, TechnoClass* pCandidate,
-		const char* pGate)
-	{
-		if (!pInfantry || !pInfantry->Type)
-			return false;
-
-		const auto pBuilding = abstract_cast<BuildingClass*>(pCandidate);
-		const auto pExt = (pBuilding && pBuilding->Type)
-			? TechnoTypeExt::ExtMap.Find(pBuilding->Type) : nullptr;
-		const bool hasPolicy = pExt && pExt->HasOccupancyPolicy();
-		const bool admits = hasPolicy
-			&& TechnoTypeExt::AdmitsOccupant(pBuilding, pInfantry);
-
-		// TEMPORARY DIAGNOSTIC: exactly one line per (gate, infantry type,
-		// building type).
-		//
-		// The previous version keyed on (gate,building) OR (infantryType,building)
-		// with a short-circuiting ||, which mixed two key namespaces in one set:
-		// whether a combination printed depended on what had printed before it.
-		// That made ABSENCE of a line unreadable, and I misread it twice — first
-		// concluding a gate was never reached when it simply lost the dedupe.
-		// A single unambiguous triple key is worth the extra entries.
-		static std::set<std::tuple<const void*, const void*, const void*>> reported;
-		if (reported.emplace((const void*)pGate, (const void*)pInfantry->Type,
-			pBuilding ? (const void*)pBuilding->Type : nullptr).second)
-		{
-			Debug::Log("[PayloadExt-diag] gate %s: %s -> %s "
-				"(Occupier=%d Assaulter=%d hasPolicy=%d admits=%d)\n",
-				pGate, pInfantry->Type->ID,
-				(pBuilding && pBuilding->Type) ? pBuilding->Type->ID : "<not-a-building>",
-				(int)pInfantry->Type->Occupier, (int)pInfantry->Type->Assaulter,
-				(int)hasPolicy, (int)admits);
-		}
-
-		return admits;
-	}
-
-	// Reads a techno pointer stored at a raw offset on the infantry. Both call
-	// sites below load the candidate building from such a field immediately
-	// after the branch we are replacing, so the offsets come straight from the
-	// surrounding disassembly.
-	TechnoClass* TechnoAt(InfantryClass* pInfantry, int offset)
-	{
-		return *reinterpret_cast<TechnoClass**>(
-			reinterpret_cast<BYTE*>(pInfantry) + offset);
-	}
-}
-
-// InfantryClass::Mission_Attack @0x51F489 — "my target is a building I could
-// garrison, so go garrison it instead of shooting it".
-//
-// ⚠ NAME CORRECTED 2026-09-14. This was called ActionOnObject for six days and
-// the diagnostic labelled it that way; it is WRONG. The InfantryClass vtable at
-// 0x7EB058 puts 0x51F3E0 in slot +0x210, and the function is nop-padded at
-// 0x51F3E0 and runs through 0x51F53E — so 0x51F489 is inside it. Anchoring
-// MissionClass's declared virtual order via QueueMission=+0x1E8 /
-// ForceMission=+0x1F0 (both observed at 0x51F449 / 0x51F4C6) puts Mission_Sleep
-// at +0x204, hence +0x210 = Mission_Attack.
-//
-// It matters: a mission handler runs PER FRAME on a unit that already holds the
-// Attack mission, whereas ActionOnObject would be the one-shot order decision.
-// Reading this as the order path sent me looking for the click handler in the
-// wrong place.
-//
-// `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
-// 0x51F49D loads the building from [ESI+0x2B4] and calls CanBeOccupiedBy; the
-// success path at 0x51F4AD does SetDestination(building,1) + ForceMission(8).
-// ===========================================================================
-// THE ACTUAL FIX (2026-09-19) — the C4 gate, upstream of everything else.
-//
-// Rex ran the matched pair and it flipped BOTH ways:
-//     GHOST with C4=yes commented out -> stopped entering (it had worked)
-//     GGI   with C4=yes added         -> started entering (it had failed)
-//     SNIPE untouched (no C4)         -> still fails
-// so `C4=` — not `Occupier=` — is what lets a player's click end in a garrison.
-//
-// InfantryTypeClass::C4 = +0xEC2 (INI key "C4" at 0x825978, read 0x524545,
-// stored 0x524559). It guards the whole garrison-conversion branch at the TOP
-// of both mission handlers:
-//
-//   Mission_Attack  0x51F3E9  mov cl,[Type+0xEC2]      ; C4?
-//                   0x51F3F1  jne 0x51F400             ; yes -> consider it
-//                   0x51F3F3  push 0xE / call 0x70D0D0 ; else HasAbility(14)?
-//                   0x51F3FE  je  0x51F456             ; neither -> never even
-//                                                      ;   looks at the target
-//   Mission_Capture 0x4D4B6F  same shape -> 0x4D4BB4 (SetDestination)
-//
-// 0x70D0D0 is HasAbility: it reads the veterancy struct at techno+0x150 via
-// 0x74FF90/0x750010, so the vanilla rule is "C4 or the ability".
-//
-// Every hook this DLL had — MissionAttack 0x51F489, MissionCapture 0x4D4B96,
-// MissionHunt, UpdatePosition, GarrisonBuilding, CanBeOccupiedBy — sits INSIDE
-// that branch. With no C4 we never reached any of them, which is why admission
-// said "ADMITTED" and nothing happened. The AI Hunt path worked all along
-// because Mission_Hunt (0x51F540) has no C4 gate.
-//
-// So: open the gate for infantry that a policy building would admit. A building
-// with no policy is untouched, and we never suppress the vanilla C4 path — we
-// only ADD a reason to proceed, so C4 units behave exactly as before.
-// ===========================================================================
-DEFINE_HOOK(0x51F3E9, InfantryClass_MissionAttack_PayloadC4Gate, 0x6)
-{
-	enum { ConsiderGarrison = 0x51F400 };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionAttack.C4")
-		? ConsiderGarrison : 0;
-}
-
-// FootClass::Mission_Capture @0x4D4B6F — the same gate on the capture path.
-// ESI and EDI are the same object here: the prologue's branchless
-// abstract_cast leaves EDI = (WhatAmI()==Infantry ? this : nullptr) and
-// 0x4D4B67 has already rejected null, so ESI == EDI. (EDI only becomes the
-// Type later, at 0x4D4B86.) Proceeding lands on SetDestination at 0x4D4BB4.
-DEFINE_HOOK(0x4D4B6F, FootClass_MissionCapture_PayloadC4Gate, 0x6)
-{
-	enum { SetDestinationAndWalk = 0x4D4BB4 };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-
-	// Back to a plain admission test. Capacity used to be folded in here because
-	// this hook fed a state machine that WROTE the destination itself; with that
-	// removed, proceeding just hands control to vanilla's own SetDestination at
-	// 0x4D4BB4, and vanilla handles a full building correctly at arrival. Read,
-	// decide, return -- nothing written.
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionCapture.C4")
-		? SetDestinationAndWalk : 0;
-}
-
-DEFINE_HOOK(0x51F489, InfantryClass_MissionAttack_PayloadOccupierGate, 0x6)
-{
-	enum { Proceed = 0x51F49D };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionAttack") ? Proceed : 0;
-}
-
-// InfantryClass::UpdatePosition @0x519698 — the arrival step.
-// `mov cl,[eax+0xEB4]` = 6 bytes. ESI = infantry, EAX = its Type.
-// 0x5196A6 loads the building from [ESI+0x5A4], confirms WhatAmI() == Building
-// (cmp eax,6) and then calls CanBeOccupiedBy.
-DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
-{
-	enum { Proceed = 0x5196A6 };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-
-	const auto pDest = TechnoAt(pInfantry, 0x5A4);
-	const bool admits = PolicyAdmits(pInfantry, pDest, "UpdatePosition");
-
-	// TEMPORARY DIAGNOSTIC: the approach itself.
-	//
-	// Everything upstream of here is now proven working — our matrix ADMITS the
-	// infantry and it does hold Mission::Capture with the right Destination — yet
-	// it never enters. The only surviving test between this point and the entry
-	// is at 0x5196CD:
-	//
-	//     ecx = MapClass::GetCellAt(this->Location)      ; [esp+0x14], set 0x519664
-	//     edi = this->Destination                        ; 0x5196C2
-	//     call 0x47C520                                  ; CellClass::GetBuilding()
-	//     cmp edi,eax / jne 0x51973C                     ; must be standing ON it
-	//
-	// i.e. the unit has to be physically on the destination building's cell. So
-	// the question is no longer "is it allowed in" but "does it ever arrive".
-	// Logging both sides of that comparison each time the branch runs shows
-	// whether it closes in and stops, or never moves at all. Bounded rather than
-	// deduped, because here the SEQUENCE is the evidence.
-	if (admits)
-	{
-		static int approachLines = 0;
-		if (approachLines < 200)
-		{
-			++approachLines;
-			// MapClass::Instance is a DEFINE_REFERENCE (an object at 0x87F7E8),
-			// not a pointer — same instance the hooked code loads into ECX.
-			const auto pCell = MapClass::Instance.TryGetCellAt(pInfantry->Location);
-			const auto pOnCell = pCell ? pCell->GetBuilding() : nullptr;
-			// admits==true implies PolicyAdmits' abstract_cast succeeded, so the
-			// destination really is a BuildingClass here.
-			const auto pDestBld = abstract_cast<BuildingClass*>(pDest);
-			Debug::Log("[PayloadExt-diag] approach %s: loc=(%d,%d) cellBld=%s "
-				"dest=%p destBld=%s %s\n",
-				pInfantry->Type->ID,
-				pInfantry->Location.X, pInfantry->Location.Y,
-				(pOnCell && pOnCell->Type) ? pOnCell->Type->ID : "<none>",
-				(void*)pDest,
-				(pDestBld && pDestBld->Type) ? pDestBld->Type->ID : "<none>",
-				(pOnCell == pDestBld) ? "MATCH -> entering" : "no match");
-		}
-	}
-
-	return admits ? Proceed : 0;
-}
 
 // ---------------------------------------------------------------------------
 // FootClass::Mission_Capture @0x4D4B96 — THE ONE THAT MADE THEM STAND STILL.
@@ -512,65 +185,9 @@ DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadOccupierGate, 0x6)
 // rejected NULL. But 0x4D4B86 REASSIGNS EDI to the Type, so at 0x4D4B96
 // EDI = InfantryTypeClass* and the instance is ESI. Stolen bytes are the whole
 // 6-byte mov.
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x4D4B96, FootClass_MissionCapture_PayloadOccupierGate, 0x6)
-{
-	enum { SetDestinationAndWalk = 0x4D4BB4 };
 
-	GET(InfantryClass* const, pInfantry, ESI);
 
-	// [ESI+0x2B4] is the objective; 0x4D4B52 has already confirmed it is a
-	// BuildingClass, and PolicyAdmits re-checks via abstract_cast regardless.
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionCapture")
-		? SetDestinationAndWalk : 0;
-}
 
-// ---------------------------------------------------------------------------
-// InfantryClass::Mission_Hunt @0x51F576 — the same gate on the AI's path.
-//
-// Slot +0x228 of the InfantryClass vtable. Structurally the mirror of the above:
-// if my objective is a building I may garrison, SetDestination + ForceMission(8)
-// (Mission::Capture) — which then lands in Mission_Capture, hooked above. Without
-// this, an AI house could never send a forced non-Occupier into a tagged
-// building, so the two belong together.
-//
-// We proceed to 0x51F58A rather than the success label 0x51F59A so the engine
-// still runs its CanBeOccupiedBy (0x457CE0) call, where the full matrix applies
-// via BuildingClass_CanBeOccupiedBy_PayloadPolicy. (0x51F574 shows the engine
-// itself skipping straight to 0x51F59A on Type+0xEBE, bypassing that check; we
-// deliberately do not.)
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x51F576, InfantryClass_MissionHunt_PayloadOccupierGate, 0x6)
-{
-	enum { CheckCanBeOccupiedBy = 0x51F58A };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-
-	return PolicyAdmits(pInfantry, TechnoAt(pInfantry, 0x2B4), "MissionHunt")
-		? CheckCanBeOccupiedBy : 0;
-}
-
-// InfantryClass::GarrisonBuilding @0x522920 — the actual entry.
-// `cmp bl,[eax+0xEB4]` = 6 bytes; BL is 0 from the prologue's `xor ebx,ebx`.
-// ESI = infantry. The building is the first stack argument: the prologue is
-// `sub esp,0xC / push ebx / push esi / push edi`, so at this point it sits at
-// [ESP+0x1C] (0xC + 3 pushes + return address). Confirmed by 0x522937 reading
-// it at [ESP+0x20] after one further `push ebp`.
-//
-// Unlike the two above, this function never calls CanBeOccupiedBy, so the
-// policy decision is made here.
-DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
-{
-	enum { Proceed = 0x52292C };
-
-	GET(InfantryClass* const, pInfantry, ESI);
-	GET_STACK(TechnoClass* const, pBuilding, 0x1C);
-
-	const auto admits = PolicyAdmits(pInfantry, pBuilding, "GarrisonBuilding");
-	GarrisonTrace::Event(pInfantry, admits ? "garrison-gate-pass" : "garrison-gate-deny",
-		abstract_cast<BuildingClass*>(pBuilding));
-	return admits ? Proceed : 0;
-}
 
 // NOTE (2026-09-18): a QueueMission/ForceMission trace lived here. It answered
 // its question and was removed. The conclusion it produced — "GGI never receives
@@ -706,9 +323,6 @@ DEFINE_HOOK(0x522920, InfantryClass_GarrisonBuilding_PayloadOccupierGate, 0x6)
 // frames, erases the entry the moment it is used, and prunes stale entries on
 // every lookup, so a recorded building cannot outlive the order that created it.
 // ===========================================================================
-namespace
-{
-}
 
 // FootClass::Mission_Capture @0x4D4B43 — `mov ecx,[esi+0x2B4]`, exactly 6 bytes,
 // the Target load whose null case bails. ESI = this (set by `mov esi,ecx` in the

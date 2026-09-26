@@ -39,13 +39,9 @@
 #include <Utilities/Macro.h>
 #include <Utilities/Debug.h>
 
-#include <set>
-
 #include <Unsorted.h>
 
 #include <Ext/TechnoType/Body.h>
-
-#include "GarrisonTrace.h"
 
 namespace
 {
@@ -69,48 +65,6 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 {
 	GET(BuildingClass* const, pBuilding, EBP);
 	GET(InfantryClass* const, pInfantry, ESI);
-
-	// TEMPORARY DIAGNOSTIC — did the append actually happen?
-	//
-	// 2026-09-18. GGI reaches this function: the log shows
-	//   gate GarrisonBuilding: GGI -> GAPILE (Occupier=0 hasPolicy=1 admits=1)
-	// so our gate passed it to 0x52292C, and yet it does not end up inside. Past
-	// 0x52292C there is no further Occupier test — the code just inlines
-	// DynamicVector::AddItem (Count++ at 0x522979, `mov [edx+eax*4],esi` at
-	// 0x52297C) and falls through here. The append is skipped ONLY if the vector
-	// cannot grow: Capacity==0 with nothing allocated (0x522951-0x522958), a
-	// CapacityIncrement <= 0 (0x52295A-0x52295F), or a failed resize (0x52296E).
-	//
-	// A co-loaded IntelExt line logged one frame later reports the same GGI as
-	// `limbo=0`, i.e. still in the world rather than inside the building — so
-	// either the append was skipped, or it happened and something ejected it.
-	// Those need different fixes, so log the count on both sides of it. Runs for
-	// every building that declares a policy, not just open-topped ones.
-	if (pInfantry && pInfantry->Type && pBuilding && pBuilding->Type)
-	{
-		const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
-		if (pBldExt && pBldExt->HasOccupancyPolicy())
-		{
-			static int entryLines = 0;
-			if (entryLines < 30)
-			{
-				++entryLines;
-				// By this point the inlined AddItem has already run, so Count
-				// includes this occupant if it was appended.
-				const int count = pBuilding->Occupants.Count;
-				const bool present = count > 0
-					&& pBuilding->Occupants.Items[count - 1] == pInfantry;
-				GarrisonTrace::Event(pInfantry, "ENTERED", pBuilding);
-
-				Debug::Log("[PayloadExt-diag] ENTERED %s -> %s: occupants=%d/%d "
-					"appended=%d inLimbo=%d openTopped=%d\n",
-					pInfantry->Type->ID, pBuilding->Type->ID,
-					count, pBuilding->Type->MaxNumberOccupants,
-					(int)present, (int)pInfantry->InLimbo,
-					(int)BuildingIsOpenTopped(pBuilding));
-			}
-		}
-	}
 
 	if (pInfantry && BuildingIsOpenTopped(pBuilding))
 	{
@@ -166,24 +120,12 @@ DEFINE_HOOK(0x52297F, InfantryClass_GarrisonBuilding_PayloadOpenTopped, 0x5)
 		// Guard is the right mission for something that cannot move but should
 		// shoot what comes into range. Logged below so the value before the
 		// change is visible either way.
-		const auto missionBefore = pInfantry->CurrentMission;
+		// NOTE: the diagnostic that used to sit here proved the occupant was already
+		// in Guard BEFORE this call (it logged "mission 5 -> 5"), so the mission was
+		// never what kept it from firing — AddPassenger was. The call is kept because
+		// it is correct for a limboed occupant and costs nothing; the logging is gone
+		// now that open-topped buildings are confirmed working in game.
 		pInfantry->QueueMission(Mission::Guard, true);
-
-		// TEMPORARY DIAGNOSTIC: distinguishes "the occupant never got registered"
-		// from "it registered but will not shoot". Logged once per building.
-		static std::set<BuildingClass*> reported;
-		if (reported.insert(pBuilding).second)
-		{
-			Debug::Log("[PayloadExt-diag] OpenTopped building %s: registered %s "
-				"(InOpenToppedTransport=%d Transporter=%p occupants=%d "
-				"passengers=%d mission %d -> %d)\n",
-				pBuilding->Type->ID, pInfantry->Type->ID,
-				(int)pInfantry->InOpenToppedTransport,
-				(void*)pInfantry->Transporter,
-				pBuilding->Occupants.Count,
-				pBuilding->Passengers.NumPassengers,
-				(int)missionBefore, (int)pInfantry->CurrentMission);
-		}
 	}
 
 	return 0;
@@ -238,49 +180,7 @@ DEFINE_HOOK(0x4580BD, BuildingClass_UnloadOccupants_PayloadOpenTopped, 0x6)
 //   * lines with tgt=0    -> it ticks but never acquires a target
 //   * lines with tgt!=0   -> it has a target, so the problem is downstream in
 //                            firing, not targeting
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
-{
-	// Per-frame sampling for the garrison lifecycle trace. Placed here rather than
-	// on a new hook because this address is the documented benign shared entry
-	// point and we already occupy it; GarrisonTrace::Tick returns immediately for
-	// anything it is not tracking.
-	{
-		GET(TechnoClass* const, pTraced, ECX);
-		GarrisonTrace::Tick(pTraced);
-	}
 
-	GET(TechnoClass* const, pThis, ECX);
-
-	if (!pThis || !pThis->InOpenToppedTransport)
-		return 0;
-
-	const auto pTransport = pThis->Transporter;
-
-	if (!pTransport || pTransport->WhatAmI() != AbstractType::Building)
-		return 0;
-
-	static int lastFrame = -1000;
-	const int frame = Unsorted::CurrentFrame;
-
-	if (frame - lastFrame < 90)
-		return 0;
-
-	lastFrame = frame;
-
-	Debug::Log("[PayloadExt-diag] occupant %s in %s: tgt=%p mission=%d inLimbo=%d "
-		"playfield=%d loc=(%d,%d) bld=(%d,%d)\n",
-		pThis->GetTechnoType()->ID,
-		pTransport->GetTechnoType()->ID,
-		(void*)pThis->Target,
-		(int)pThis->CurrentMission,
-		(int)pThis->InLimbo,
-		(int)pThis->IsInPlayfield,
-		pThis->Location.X, pThis->Location.Y,
-		pTransport->Location.X, pTransport->Location.Y);
-
-	return 0;
-}
 
 // ---------------------------------------------------------------------------
 // TEMPORARY DIAGNOSTIC — is the target SCAN even being attempted?
@@ -296,30 +196,4 @@ DEFINE_HOOK(0x6F9E50, TechnoClass_Update_PayloadOpenToppedDiag, 0x5)
 // always return 0, so both chain. (0x4D9923 would look like a tidier 6-byte
 // site but sits INSIDE Antares' stolen range -- a real overlap, not a share.)
 // ECX = FootClass* on entry, before `mov esi,ecx`.
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x4D9920, FootClass_SelectAutoTarget_PayloadOpenToppedDiag, 0x9)
-{
-	GET(TechnoClass* const, pThis, ECX);
 
-	if (!pThis || !pThis->InOpenToppedTransport)
-		return 0;
-
-	const auto pTransport = pThis->Transporter;
-
-	if (!pTransport || pTransport->WhatAmI() != AbstractType::Building)
-		return 0;
-
-	static int scans = 0;
-
-	// A handful of lines is enough to prove it is being called at all.
-	if (++scans <= 5)
-	{
-		Debug::Log("[PayloadExt-diag] SelectAutoTarget #%d for %s in %s "
-			"(mission=%d tgt=%p)\n",
-			scans, pThis->GetTechnoType()->ID,
-			pTransport->GetTechnoType()->ID,
-			(int)pThis->CurrentMission, (void*)pThis->Target);
-	}
-
-	return 0;
-}
