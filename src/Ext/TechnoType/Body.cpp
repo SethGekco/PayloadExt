@@ -399,6 +399,111 @@ void TechnoTypeExt::ExtData::ReadGarrisonWeapons(INI_EX& exINI, const char* pSec
 	}
 }
 
+// ============================================================================
+// OpenTopped profile selected by veterancy
+//
+// Phobos already provides the per-type values (OpenTopped.DamageMultiplier,
+// OpenTopped.RangeBonus). This supplies only the selection by rank, and applies
+// at the convergence points AFTER vanilla's and Phobos's own modifiers, so the
+// two compose rather than compete.
+//
+//   [BFRT]
+//   OpenTopped=yes
+//   OpenTopped.Profile.Elite=BFRTElite     ; Profile = a named SECTION
+//   OpenTopped.VeterancySource=transport   ; transport (default) | passenger
+//
+//   [BFRTElite]
+//   DamageMultiplier=1.5
+//   RangeBonus=2
+// ============================================================================
+
+void TechnoTypeExt::OpenToppedProfile::LoadFromSection(
+	CCINIClass* pINI, const char* pSection)
+{
+	if (!pINI || !pSection || !*pSection || !pINI->GetSection(pSection))
+		return;
+
+	INI_EX exINI(pINI);
+
+	// Plain key names: a profile section is ours alone, so there is nothing here
+	// to collide with Phobos's identically-purposed per-TYPE tags.
+	this->DamageMultiplier.Read(exINI, pSection, "DamageMultiplier");
+	this->RangeBonus.Read(exINI, pSection, "RangeBonus");
+}
+
+const TechnoTypeExt::OpenToppedProfile*
+TechnoTypeExt::ExtData::GetOpenToppedProfile(int rank) const
+{
+	if (rank < 0)
+		rank = 0;
+	else if (rank >= RankCount)
+		rank = RankCount - 1;
+
+	// Fall back DOWNWARD: elite -> veteran -> rookie. Declaring only an Elite
+	// profile therefore affects elites and leaves everyone else at vanilla,
+	// which is what an author writing one line expects.
+	for (int i = rank; i >= 0; --i)
+	{
+		if (this->OpenToppedProfileSet[i])
+			return &this->OpenToppedProfiles[i];
+	}
+
+	return nullptr;
+}
+
+// Takes the raw CCINIClass* as well as the wrapper: INI_EX keeps its IniFile
+// member private, and a profile lives in a DIFFERENT section from the type being
+// parsed, so we need to read across sections.
+void TechnoTypeExt::ExtData::ReadOpenToppedProfiles(
+	CCINIClass* pINI, INI_EX& exINI, const char* pSection)
+{
+	// Index 0 has no suffix so `OpenTopped.Profile=` is the base/rookie entry,
+	// matching the general form <Domain>.Profile[.<Selector>]=<Section>.
+	static const char* const rankKeys[RankCount] = { "", ".Veteran", ".Elite" };
+
+	char key[0x40];
+
+	for (int i = 0; i < RankCount; ++i)
+	{
+		_snprintf_s(key, _TRUNCATE, "OpenTopped.Profile%s", rankKeys[i]);
+
+		if (exINI.ReadString(pSection, key) <= 0)
+			continue;
+
+		const char* const section = exINI.value();
+
+		if (!section || !*section)
+			continue;
+
+		// A named section that does not exist is an authoring mistake worth
+		// saying out loud: silently behaving as vanilla is the hard version of
+		// this bug to find.
+		if (!pINI->GetSection(section))
+		{
+			Debug::Log("[PayloadExt] %s: %s=%s names a section that does not "
+				"exist; ignored.\n", this->OwnerObject()->ID, key, section);
+			continue;
+		}
+
+		this->OpenToppedProfiles[i].LoadFromSection(pINI, section);
+		this->OpenToppedProfileSet[i] = true;
+	}
+
+	if (exINI.ReadString(pSection, "OpenTopped.VeterancySource") > 0)
+	{
+		const char* const raw = exINI.value();
+
+		if (!_strcmpi(raw, "passenger") || !_strcmpi(raw, "occupant"))
+			this->OpenTopped_VeterancySource = VeterancySource::Passenger;
+		else if (!_strcmpi(raw, "transport") || !_strcmpi(raw, "vehicle"))
+			this->OpenTopped_VeterancySource = VeterancySource::Transport;
+		else
+			Debug::Log("[PayloadExt] %s: OpenTopped.VeterancySource=%s is not "
+				"transport or passenger; keeping transport.\n",
+				this->OwnerObject()->ID, raw);
+	}
+}
+
 void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 {
 	const char* pSection = this->OwnerObject()->ID;
@@ -419,10 +524,12 @@ void TechnoTypeExt::ExtData::LoadFromINIFile(CCINIClass* const pINI)
 
 	this->ReadOccupancy(exINI, pSection);
 	this->ReadGarrisonWeapons(exINI, pSection);
+	this->ReadOpenToppedProfiles(pINI, exINI, pSection);
 }
 
-// GarrisonWeapons is type data, re-parsed from INI on every load, so it is
-// deliberately NOT serialized. Save and Load stay symmetric.
+// GarrisonWeapons and the OpenTopped profiles are type data, re-parsed from INI
+// on every load, so they are deliberately NOT serialized. Save and Load stay
+// symmetric.
 template <typename T>
 void TechnoTypeExt::ExtData::Serialize(T& Stm)
 {

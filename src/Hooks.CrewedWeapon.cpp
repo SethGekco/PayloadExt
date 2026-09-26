@@ -209,6 +209,55 @@ DEFINE_HOOK(0x6FD1B1, TechnoClass_RearmDelay_PayloadRA2Garrison, 0x6)
 }
 
 // ---------------------------------------------------------------------------
+// OpenTopped profile selected by veterancy.
+//
+// Rex's original Veteran/Elite ask. Deliberately small: Phobos already ships the
+// per-type values (OpenTopped.DamageMultiplier / .RangeBonus), so all that is
+// missing is choosing a set of them by RANK. Both hooks below are convergence
+// points we already own, and both only adjust a register — nothing is written to
+// the unit, which is the property that kept every working feature in this DLL out
+// of trouble.
+//
+// The firer is the PASSENGER: ObjectClass::InOpenToppedTransport (+0x82) marks it
+// and TechnoClass::Transporter (+0x11C) points at the vehicle. The profile is
+// read from the TRANSPORT's type either way, because it describes the transport's
+// firing ports; only whose RANK selects it is configurable.
+// ---------------------------------------------------------------------------
+namespace
+{
+	const TechnoTypeExt::OpenToppedProfile* ActiveOpenToppedProfile(TechnoClass* pFirer)
+	{
+		if (!pFirer || !pFirer->InOpenToppedTransport)
+			return nullptr;
+
+		const auto pTransport = pFirer->Transporter;
+
+		if (!pTransport)
+			return nullptr;
+
+		const auto pType = pTransport->GetTechnoType();
+
+		if (!pType)
+			return nullptr;
+
+		const auto pExt = TechnoTypeExt::ExtMap.Find(pType);
+
+		if (!pExt || !pExt->HasOpenToppedProfile())
+			return nullptr;
+
+		const auto& rankOf =
+			(pExt->OpenTopped_VeterancySource == TechnoTypeExt::VeterancySource::Passenger)
+				? pFirer->Veterancy : pTransport->Veterancy;
+
+		const int rank = rankOf.IsElite() ? 2 : (rankOf.IsVeteran() ? 1 : 0);
+
+		const auto pProfile = pExt->GetOpenToppedProfile(rank);
+
+		return (pProfile && !pProfile->IsIdentity()) ? pProfile : nullptr;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 4. Per-entry FirepowerMultiplier.
 //
 // TechnoClass::FireAt @0x6FE460 — the convergence point AFTER vanilla's three
@@ -225,12 +274,18 @@ DEFINE_HOOK(0x6FE460, TechnoClass_FireAt_PayloadGarrisonFirepower, 0x6)
 	GET(TechnoClass* const, pThis, ESI);
 	GET(int const, damage, EDI);
 
-	const auto pEntry = ActiveGarrisonEntry(pThis);
+	// Two independent sources meet here: a garrison crewman's per-entry
+	// multiplier, and an open-topped passenger's rank-selected profile. They are
+	// mutually exclusive in practice (a unit is either crewing a building weapon
+	// or shooting out of a transport) but multiplying rather than branching means
+	// neither has to know about the other.
+	double multiplier = 1.0;
 
-	if (!pEntry)
-		return 0;
+	if (const auto pEntry = ActiveGarrisonEntry(pThis))
+		multiplier *= pEntry->FirepowerMultiplier.Get();
 
-	const double multiplier = pEntry->FirepowerMultiplier.Get();
+	if (const auto pProfile = ActiveOpenToppedProfile(pThis))
+		multiplier *= pProfile->DamageMultiplier.Get();
 
 	if (multiplier == 1.0)
 		return 0;
@@ -265,12 +320,13 @@ DEFINE_HOOK(0x6F72EF, TechnoClass_InRange_PayloadGarrisonRange, 0x6)
 	GET(TechnoClass* const, pThis, ESI);
 	GET(int const, range, EBX);
 
-	const auto pEntry = ActiveGarrisonEntry(pThis);
+	int bonusCells = 0;
 
-	if (!pEntry)
-		return 0;
+	if (const auto pEntry = ActiveGarrisonEntry(pThis))
+		bonusCells += pEntry->RangeBonus.Get();
 
-	const int bonusCells = pEntry->RangeBonus.Get();
+	if (const auto pProfile = ActiveOpenToppedProfile(pThis))
+		bonusCells += pProfile->RangeBonus.Get();
 
 	if (!bonusCells)
 		return 0;

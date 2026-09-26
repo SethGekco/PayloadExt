@@ -46,6 +46,45 @@ public:
 		Valueable<int> RangeBonus { 0 };
 	};
 
+	// --- OpenTopped profile selected by veterancy (docs/INDEX-SYSTEM.md) -----
+	//
+	// Rex's original ask: "the Veteran and Elite tags are for being able to
+	// specify an OpenTopped index based on being vet or elite."
+	//
+	// Phobos already supplies the per-TYPE values (OpenTopped.DamageMultiplier,
+	// OpenTopped.RangeBonus), so this deliberately does NOT reimplement them. It
+	// adds the missing half: choosing a set of modifiers by RANK. Our values
+	// apply at the convergence points after vanilla's and Phobos's, so the two
+	// compose instead of competing.
+	//
+	// Naming follows the binding rule: Index = integer, Profile = named section.
+	// So the selector is a section name, and the section holds plain keys.
+	struct OpenToppedProfile
+	{
+		// Multiplies the damage of a shot fired OUT of the transport.
+		Valueable<double> DamageMultiplier { 1.0 };
+		// Added to the firing range, in CELLS. May be negative.
+		Valueable<int> RangeBonus { 0 };
+
+		// A profile that changes nothing costs a lookup and no register write.
+		bool IsIdentity() const
+		{
+			return this->DamageMultiplier.Get() == 1.0 && this->RangeBonus.Get() == 0;
+		}
+
+		void LoadFromSection(CCINIClass* pINI, const char* pSection);
+	};
+
+	// Whose rank picks the profile. The transport's is the default: the intent is
+	// "a veteran Battle Fortress makes its passengers shoot better", which is a
+	// property of the vehicle. Passenger is offered because the opposite reading
+	// ("veteran troops shoot better wherever they stand") is equally sensible and
+	// was left open in the original design notes.
+	enum class VeterancySource { Transport, Passenger };
+
+	// Rank slots, indexed by the engine's own three ranks.
+	static constexpr int RankCount = 3;   // 0 rookie, 1 veteran, 2 elite
+
 	// The three occupant CLASSES a building can admit. They are independent
 	// filters, not modes: a building may admit any combination.
 	//   0 Vanilla    -- the stock garrison, gated by InfantryType Occupier=
@@ -100,6 +139,30 @@ public:
 		Valueable<int> Garrison_MinOccupants;
 
 		std::vector<GarrisonWeaponEntry> GarrisonWeapons;
+
+		// --- OpenTopped profile by veterancy --------------------------------
+		// Index 0 rookie / 1 veteran / 2 elite. A rank with no profile of its own
+		// falls back DOWNWARD (elite -> veteran -> rookie -> nothing), so
+		// declaring only Elite works and only affects elites.
+		OpenToppedProfile OpenToppedProfiles[RankCount] {};
+		bool OpenToppedProfileSet[RankCount] {};
+		// Plain member, not Valueable<>: the string is parsed by hand (there is no
+		// Parser<> specialisation for this enum) and it is type data that is
+		// re-read on every INI load, so it is never serialized.
+		VeterancySource OpenTopped_VeterancySource { VeterancySource::Transport };
+
+		// Resolves the profile for a rank, applying the downward fallback.
+		// Returns nullptr when this type declares none at all, which is the
+		// common case and keeps the firing hooks free.
+		const OpenToppedProfile* GetOpenToppedProfile(int rank) const;
+		void ReadOpenToppedProfiles(CCINIClass* pINI, INI_EX& exINI,
+			const char* pSection);
+
+		bool HasOpenToppedProfile() const
+		{
+			return this->OpenToppedProfileSet[0] || this->OpenToppedProfileSet[1]
+				|| this->OpenToppedProfileSet[2];
+		}
 
 		// --- Occupancy permissions (docs/GARRISON.md) -----------------------
 		// InfantryType side. Index 0 (vanilla) is the engine's own Occupier=
