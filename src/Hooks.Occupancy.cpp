@@ -78,6 +78,71 @@ DEFINE_HOOK(0x457D48, BuildingClass_CanBeOccupiedBy_PayloadReach, 0x6)
 }
 
 // ---------------------------------------------------------------------------
+// Step 1b — make the grant INVISIBLE at the capture-arrival dispatch.
+//
+// InfantryClass::UpdatePosition @0x519698 — `mov cl,[eax+0xEB4]` (Occupier=),
+// exactly 6 bytes. ESI = the infantry, EAX = its Type. Reached only at
+// cell-centre arrival (`[ESP+0x54] == 2`, tested 0x51966C) while holding
+// Mission::Capture (tested 0x51967F). 0x51973C is where vanilla goes when
+// neither Occupier= nor Assaulter= is set — i.e. "this is not a garrison
+// arrival, carry on with the rest of UpdatePosition".
+//
+// WHY THIS EXISTS. Garrison entry and engineer capture share Mission::Capture,
+// and this dispatch consults Occupier= BEFORE the engineer/spy handling further
+// down. So a SYNTHESISED Occupier= pulled those units into the garrison branch,
+// where our own claw-back veto answered "cannot occupy" — and at an arrival the
+// engine reads that as MISSION FAILED, not as "try the other branch": it clears
+// the destination, scatters the unit and returns (0x5196DD-0x51970D). The veto
+// cannot help here, because here the refusal IS the abort.
+//
+// The narrow half of the fix lives in SynthesiseOccupiers(), which no longer
+// grants to Engineer/Agent types at all. This is the general half: for ANY
+// synthesised occupier arriving at a building we do NOT govern, skip the whole
+// garrison block exactly as vanilla would for a non-occupier. Without it, all
+// sixty-odd granted types would still walk up to an ordinary garrisonable
+// building and bounce off it, because the veto refuses and the engine scatters.
+//
+// Authored occupiers are never touched, so E1/E2/INIT keep their exact vanilla
+// behaviour. Read-only: this only chooses a branch.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x519698, InfantryClass_UpdatePosition_PayloadSynthesisedIsInvisible, 0x6)
+{
+	enum { NotAGarrisonArrival = 0x51973C };
+
+	GET(InfantryClass* const, pInfantry, ESI);
+
+	if (!pInfantry || !pInfantry->Type)
+		return 0;
+
+	const auto pInfExt = TechnoTypeExt::ExtMap.Find(pInfantry->Type);
+
+	// Only our own grant is in question. Anything the author wrote behaves as it
+	// always did.
+	if (!pInfExt || !pInfExt->OccupierSynthesised || pInfExt->OccupierAuthored)
+		return 0;
+
+	// The destination is loaded by vanilla at 0x5196A6; read it early to decide.
+	// A non-building destination is left to vanilla's own check at 0x5196B6.
+	const auto pDest = *reinterpret_cast<AbstractClass**>(
+		reinterpret_cast<BYTE*>(pInfantry) + 0x5A4);
+
+	const auto pBuilding = pDest ? abstract_cast<BuildingClass*>(pDest) : nullptr;
+
+	if (!pBuilding || !pBuilding->Type)
+		return 0;
+
+	const auto pBldExt = TechnoTypeExt::ExtMap.Find(pBuilding->Type);
+
+	// Governed building: this really is a garrison arrival, so let vanilla run and
+	// let the policy decide as usual.
+	if (pBldExt && pBldExt->HasOccupancyPolicy())
+		return 0;
+
+	// Untagged building: behave as though we had never granted the flag.
+	return NotAGarrisonArrival;
+}
+
+// ---------------------------------------------------------------------------
 // Step 2 — the decision itself.
 //
 // BuildingClass::CanBeOccupiedBy @0x457D58 — `mov eax,[esi+0x21C]`, exactly 6

@@ -269,6 +269,41 @@ void TechnoTypeExt::SynthesiseOccupiers()
 		if (pInfType->Occupier)
 			continue; // already an occupier; nothing to grant
 
+		// ------------------------------------------------------------------
+		// Never synthesise onto a type whose Mission::Capture ARRIVAL the engine
+		// already owns.
+		//
+		// 2026-09-27 REGRESSION, mine, found by a separate investigation session:
+		// engineers stopped capturing anything. Garrison entry and engineer
+		// capture share Mission::Capture, and InfantryClass::UpdatePosition
+		// dispatches on the Occupier/Assaulter flags at 0x51968E-0x5196A0 BEFORE
+		// it reaches the engineer handling further down. A synthesised Occupier=
+		// therefore diverted engineers into the garrison branch, where
+		// CanBeOccupiedBy refused them -- and at an arrival the engine reads
+		// "cannot occupy" as "mission failed": it clears the destination,
+		// scatters the unit and RETURNS (0x5196DD-0x51970D). The capture commit at
+		// 0x519A1F / 0x519F71 was never reached. The claw-back veto could not save
+		// it, because there the refusal IS the abort.
+		//
+		// Which roles are affected was determined rather than guessed: the only
+		// InfantryTypeClass flags read downstream of that abort (0x51973C-0x51A200)
+		// are +0xEC3 and +0xEC4 -- Engineer and Agent, i.e. engineer capture and
+		// spy infiltration. Deliberately NOT excluding C4 or VehicleThief, which a
+		// wider guess would have caught: C4 demolition is Mission::Sabotage, not
+		// Capture, and excluding it would silently stop SEAL/Tanya types
+		// garrisoning, which is confirmed working.
+		//
+		// Also fixes the mirror case: at a TAGGED building a synthesised engineer
+		// would have been admitted and garrisoned instead of capturing.
+		if (pInfType->Engineer || pInfType->Agent)
+		{
+			Debug::Log("[PayloadExt] Occupier= NOT granted to %s: the engine owns "
+				"its Mission::Capture arrival (Engineer=%d Agent=%d), and a "
+				"synthesised Occupier= would abort that mission.\n",
+				pInfType->ID, (int)pInfType->Engineer, (int)pInfType->Agent);
+			continue;
+		}
+
 		bool wanted = false;
 
 		for (auto const pBldType : BuildingTypeClass::Array)
