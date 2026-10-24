@@ -458,3 +458,31 @@ Antares already provides `CanBeOccupiedBy=E1,E2` on a BuildingType (empty = allo
 all). It still applies on every building where we return 0. If you declare a
 PayloadExt policy on a building, prefer expressing the whole rule in PayloadExt
 terms rather than mixing the two.
+
+---
+
+## Status — confirmed in game (2026-10-23)
+
+Rex ran the `[GAPILE]` rig to completion and then **removed it**, which is the
+real sign-off: the tags are no longer needed to demonstrate the feature.
+
+| Feature | State |
+|---|---|
+| RA2 mode (building owns the gun, infantry crew it) | ✅ confirmed in game |
+| ROF scaling per occupant (`GarrisonWeapon.ROFPerOccupant`, `.ROFMaxOccupants`) | ✅ confirmed — Rex measured ≈0.63 s at 4 crew |
+| Multiple `GarrisonWeapon[N]` entries, picked by occupant type | ✅ confirmed |
+| Per-entry `ROF`/`Firepower`/`Range` modifiers | ✅ confirmed |
+| 3-class occupancy permission matrix + `Deny` blacklist | ✅ confirmed |
+| `Occupier=` synthesis (forced non-occupier types can enter) | ✅ confirmed — "E1 and GGI enters all buildings" |
+| OpenTopped **buildings** (each occupant fires its own weapon out) | ✅ confirmed |
+| OpenTopped profile by veterancy (INDEX-SYSTEM.md) | ⏳ built, rig armed on `[GAPILL]`, **untested** |
+| Engineer/Agent capture fix for the synthesis | ⏳ built, **untested** |
+
+⚠ **A removed test rig does not reduce the synthesis grant set.** The grant loop
+in `SynthesiseOccupiers()` asks *"does ANY policy-bearing building admit this
+type?"*, so it only shrinks when the **last** such building loses its policy.
+After GAPILE was cleaned, four remained in Rex's rules — `[GAPILL]`, `[NABNKR]`,
+`[GABUNK]`, `[YABUNK]` — the last two carrying `Occupier.OpenTopped.Force=all`
+with no `;PLXTEST` marker, so grepping for the test tag does not find them.
+Grep for the **tag family** (`Occupier\.(RA2|OpenTopped)\.(Force|Deny)`), not for
+the test marker, before reasoning about which types are governed.
